@@ -33,13 +33,13 @@
   <p class="sub"><b>Rolling source of truth for what is LIVE right now.</b> The wiki can lag; this file
      cannot. Read this on every session start to avoid rebuilding what exists. This is your
      <i>git-like restart point</i>: if context is lost, this file rehydrates you.
-     Last updated: <code>{{TIMESTAMP}}</code> · by loop: <code>{{LOOP_ID}}</code></p>
+     Last updated: <code>2026-08-02</code> · by loop: <code>L1-BUILD-M1</code></p>
 
   <!-- ───────────── ONE-LINE STATUS ───────────── -->
   <div class="card live">
-    <b>Now in flight:</b> {{NOW_IN_FLIGHT}}<br>
-    <b>Active loop:</b> {{ACTIVE_LOOP}} · <b>Current milestone:</b> {{MILESTONE_ID}} · <b>Phase:</b> {{PHASE}}<br>
-    <b>Blocked on:</b> {{BLOCKERS}}
+    <b>Now in flight:</b> nothing — M1 approved, M2 not yet started<br>
+    <b>Active loop:</b> NONE · <b>Current milestone:</b> M1 (done) → M2 (next) · <b>Phase:</b> 1 Architecture → 5 LLM &amp; Reasoning<br>
+    <b>Blocked on:</b> DONE.html / PLAN.md need the user's go-ahead before M1's row can be flipped to done
   </div>
 
   <!-- ───────────── WHAT'S LIVE ───────────── -->
@@ -48,8 +48,11 @@
     <table>
       <thead><tr><th>Capability</th><th>Where (file/route/symbol)</th><th>Status</th><th>Verified by</th></tr></thead>
       <tbody>
-        <tr><td>{{CAP_1}}</td><td><code>{{LOC_1}}</code></td><td><span class="pill live">live</span></td><td>{{VERIFY_1}}</td></tr>
-        <tr><td>{{CAP_2}}</td><td><code>{{LOC_2}}</code></td><td><span class="pill wip">partial</span></td><td>—</td></tr>
+        <tr><td>Parse a unified diff into files + real post-image line numbers</td><td><code>src/prreview/diff.py</code></td><td><span class="pill live">live</span></td><td>L4 APPROVE r6; 431 real-git-diff trials, 0 mismatches</td></tr>
+        <tr><td>Security specialist returns grounded, schema-valid Findings offline</td><td><code>src/prreview/agents/{base,security}.py</code></td><td><span class="pill live">live</span></td><td>L4 APPROVE r6</td></tr>
+        <tr><td>Findings dropped for hallucination vs schema failure are counted separately and surfaced</td><td><code>src/prreview/contracts.py</code>, <code>cli.py</code></td><td><span class="pill live">live</span></td><td>L4 APPROVE r6</td></tr>
+        <tr><td>CLI: text + JSON output, exit 2 bad input / 1 lane failed / 0 ran</td><td><code>src/prreview/cli.py</code></td><td><span class="pill live">live</span></td><td>L4 APPROVE r6</td></tr>
+        <tr><td>Quality / tests / docs specialists, parallel fan-out, aggregator</td><td><code>—</code></td><td><span class="pill">todo</span></td><td>M2</td></tr>
         <tr><td>add rows as milestones complete…</td><td></td><td></td><td></td></tr>
       </tbody>
     </table>
@@ -60,7 +63,7 @@
   <h2>Decisions that constrain new work</h2>
   <div class="card">
     <ul>
-      <li><code>{{DECISION_ID}}</code> — {{DECISION_SUMMARY}} → see <code>decisions/{{DECISION_ID}}.md</code></li>
+      <li><code>0001-prototype-subset</code> — build a prototype subset of the study PDF (4 specialists, Finding contract, aggregator, HITL gate, events spine); defer webhook/queue/RAG/Tiger/dashboard → see <code>decisions/0001-prototype-subset.md</code></li>
       <li>add ADR pointers here so future loops don't relitigate settled calls</li>
     </ul>
   </div>
@@ -83,8 +86,8 @@
   <h2>Known gaps &amp; the ordered Next list</h2>
   <div class="card">
     <ol>
-      <li>{{NEXT_1}}</li>
-      <li>{{NEXT_2}}</li>
+      <li>M2 — quality/tests/docs specialists, parallel fan-out, aggregator with dedup by (file_path, line_start)</li>
+      <li>Flip M1 to done in DONE.html §3 and append the M1 row to PLAN.md Progress (needs user go-ahead)</li>
     </ol>
     <p class="note">Mirror of <code>checkpoints/CURRENT.md → next_action</code>, but human-readable and durable across compaction.</p>
   </div>
@@ -92,7 +95,7 @@
   <!-- ───────────── SESSION LOG (append-only) ───────────── -->
   <h2>Session log (append-only, newest first)</h2>
   <div class="card">
-    <p><code>{{TIMESTAMP}}</code> — {{SESSION_SUMMARY}}</p>
+    <p><code>2026-08-02</code> — Genesis G0-G6 run; M1 built and approved at L4 round 6 after 5 rejections and 10 blocking defects (3 self-inflicted by earlier fixes). Tests 16 -> 93. Every defect reproduced before fixing.</p>
     <p class="note">One paragraph per session: what shipped, what broke, what's next. This is the narrative the next cold session reads first.</p>
   </div>
 

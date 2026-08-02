@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>M1 explained — ai-pr-review-multi-agent</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --ink:#e6edf3; --mut:#8b949e;
+          --ok:#2ea043; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.6 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:900px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:34px 0 12px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+  h3 { font-size:15px; margin:22px 0 8px; color:var(--accent); }
+  .sub { color:var(--mut); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:12px 0; }
+  .bad { border-left:3px solid var(--bad); }
+  .ok { border-left:3px solid var(--ok); }
+  code { background:#1f2630; padding:1px 6px; border-radius:5px; font-size:13px; }
+  pre { background:#1f2630; padding:12px 14px; border-radius:8px; overflow-x:auto; font-size:13px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; margin:8px 0; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-weight:600; }
+  .q { background:#1a2230; border:1px solid var(--accent); border-radius:8px; padding:14px 16px; margin:10px 0; }
+  .note { color:var(--mut); font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>M1 explained — Finding contract + security specialist</h1>
+<p class="sub">Generated after L4 VERIFY APPROVE · 2026-08-02 · 6 review rounds, 10 blocking defects,
+   16 → 93 tests. Read this, then answer the three questions at the bottom.</p>
+
+<h2>What M1 actually built</h2>
+<div class="card">
+<p>A pull-request diff goes in; grounded, schema-valid <code>Finding</code> objects come out —
+   with no network, no API key, and no GitHub access.</p>
+<pre>fixtures/sample.diff
+      ↓  parse_diff()          → files, hunks, real line numbers   [core, imports nothing]
+      ↓  render_for_prompt()   → "&lt;line_no&gt;: &lt;content&gt;" per line
+      ↓  OfflineLLM.complete() → JSON envelope, deterministic      [adapter]
+      ↓  Specialist.review()   → parse, validate, GROUND, count    [domain]
+      ↓  cli.py                → text or JSON, exit code           [entry]</pre>
+<table>
+  <tr><th>File</th><th>Job</th></tr>
+  <tr><td><code>contracts.py</code></td><td><code>Finding</code> (confidence + rationale <b>required</b>), <code>AgentResult</code>, <code>Review</code>. Imports nothing internal.</td></tr>
+  <tr><td><code>diff.py</code></td><td>Parses unified diffs. <code>is_grounded()</code> is the INV-3 predicate.</td></tr>
+  <tr><td><code>llm.py</code></td><td>Client boundary. <code>OfflineLLM</code> is deterministic; <code>AnthropicLLM</code> has a hard timeout.</td></tr>
+  <tr><td><code>agents/base.py</code></td><td>Grounds, counts, and <b>never raises</b>.</td></tr>
+  <tr><td><code>agents/security.py</code></td><td>Only the domain prompt differs.</td></tr>
+  <tr><td><code>cli.py</code></td><td>argv, stdout, exit codes. Exit 2 = bad input, 1 = lane failed, 0 = ran.</td></tr>
+</table>
+</div>
+
+<h2>The one idea that makes the rest work</h2>
+<div class="card ok">
+<p><b>Structured output turns the next step into data processing.</b> Because every specialist returns
+   <code>Finding</code> objects rather than prose, the aggregator (M2) can deduplicate by
+   <code>(file_path, line_start)</code>, and the HITL gate (M3) can threshold on a number. Against four
+   blobs of English, neither is possible. This is why <code>PLAN.md</code>'s brainstorm rejected the
+   "one big reviewer" approach outright: prose cannot be thresholded, deduped, or evaluated.</p>
+<p><b>Grounding is enforcement, not prompting.</b> The prompt asks the model to cite only visible lines;
+   <code>is_grounded()</code> then <em>checks</em>, and drops what fails. Asking politely is not a control.</p>
+</div>
+
+<h2>What went wrong — the six review rounds</h2>
+<p class="note">Every defect below was found by a separate opus-5 verifier, not by the maker, and every
+   one was reproduced before being fixed. Three were introduced by earlier fixes.</p>
+
+<h3>Round 1 — five defects</h3>
+<div class="card bad">
+<p><b>B3, the worst:</b> <code>is_grounded()</code> tested <em>overlap</em>, not containment. A finding
+   claiming lines <code>1..100000</code> passed against a hunk of <code>10..23</code> — neither endpoint
+   real — because the range straddled it. The CLI then printed <code>app/db.py:1</code>, a location that
+   does not exist. The hole was inside the function implementing the anti-hallucination invariant.</p>
+<p>Same line also enumerated every line in the range: a 5M-line range took <b>2.11s</b>, so a model
+   emitting <code>line_end: 1000000000</code> buys minutes of dead spin. Now containment-only, O(hunks).</p>
+<p><b>B2:</b> the fixture was a <em>corrupt patch</em> — <code>git apply --check</code> said so — whose
+   hunk headers over-claimed their bodies. Every INV-3 test was validated against a fixture that was
+   itself lying. Regenerated from real <code>git diff</code>.</p>
+</div>
+
+<h3>Round 2 — a regression from round 1's own fix</h3>
+<div class="card bad">
+<p><b>BD-1:</b> Round 1 guarded the file-header check with "am I inside a hunk?", inferred from line
+   prefixes. But git renders a deleted line starting <code>-- </code> as <code>--- &lt;content&gt;</code> —
+   identical in prefix to a file header. The hunk ended early and the next added line beginning
+   <code>++ </code> was read as a <em>new file</em>:</p>
+<pre>paths: ['mig.sql', 'phantom.py']
+  mig.sql    added: {}                            ← real file, content lost
+  phantom.py added: {3: 'password = "leaked"'}    ← invented file</pre>
+<p>A credential, in the security lane, on a valid patch. INV-3 still passed, because nothing
+   <em>ungrounded</em> was shown — the finding was simply gone. <b>Lesson: prefixes cannot separate
+   content from structure in this format.</b> Hunk headers declare their length; count instead.</p>
+</div>
+
+<h3>Rounds 3–5 — one root cause, chased through three layers</h3>
+<div class="card bad">
+<p>The same bug wore three costumes: <b>characters Python treats as structure but a diff treats as
+   content.</b></p>
+<table>
+  <tr><th>Round</th><th>Where</th><th>Symptom</th></tr>
+  <tr><td>3</td><td><code>splitlines()</code> in the parser</td><td>A form feed split an added line in two; content lost, numbers shifted.</td></tr>
+  <tr><td>4</td><td><code>render_for_prompt()</code></td><td>Unescaped content broke the <code>&lt;line_no&gt;: </code> framing; a CRITICAL landed on an unmodified <em>context</em> line.</td></tr>
+  <tr><td>5</td><td><code>read_text()</code> in the CLI</td><td>Universal-newline mode rewrote a lone <code>\r</code> to <code>\n</code> <em>before</em> the parser ran.</td></tr>
+</table>
+<p>Round 5 is the instructive one. The parser was <b>correct</b>; it was handed an already-corrupted
+   diff. Fixing a component does not fix the pipeline if something upstream mangles the input first.</p>
+<pre>[CRITICAL] app.py:6  (sql-injection)   ← the injection is on line 5
+                                          line 6 is `return cur.fetchone()`</pre>
+<p>And each time, <b>INV-3 reported green</b> — the shifted line was still inside the hunk, so the
+   grounding check happily accepted a finding pointing at the wrong place. A check can pass while the
+   thing it checks is broken.</p>
+</div>
+
+<h3>The counters (B5 / BD-2)</h3>
+<div class="card bad">
+<p>Findings were dropped silently. A lane whose every finding was hallucinated was <em>byte-identical</em>
+   to a lane that genuinely found nothing: <code>ok=True, findings=(), error=None</code>. The reviewer
+   reads "no findings" and moves on. Now <code>dropped_ungrounded</code> and
+   <code>dropped_malformed</code> are tracked <b>separately</b> — different failures, different fixes —
+   and <code>produced_nothing_usable</code> warns loudly.</p>
+</div>
+
+<h2>Things worth stealing for the rest of the build</h2>
+<div class="card">
+<ul>
+  <li><b>Ground truth must come from outside the code under test.</b> The fixture is generated by real
+      <code>git diff</code> and applies cleanly; the tests assert against the real post-image, not against
+      the parser's own arithmetic. The original tests substring-matched joined text and asserted no line
+      numbers at all — which is exactly how an off-by-N bug shipped.</li>
+  <li><b>A passing invariant is not proof.</b> INV-3 went green through three separate mis-location bugs.</li>
+  <li><b>Test the seam, not just the unit.</b> Every test called <code>parse_diff</code> on a string
+      literal, so a bug living in the <em>file read</em> was invisible by construction.</li>
+  <li><b>mypy strict earned its place:</b> it caught <code>read_text(newline=)</code> as 3.13-only when
+      the package targets ≥3.11 — a crash for every user not on this machine's Python.</li>
+</ul>
+</div>
+
+<h2>Quiz — answer these three</h2>
+
+<div class="q">
+<p><b>1.</b> <code>is_grounded()</code> originally returned <code>True</code> for a finding claiming lines
+   <code>1..100000</code> on a file whose only hunk was <code>10..23</code>. Neither endpoint was inside
+   the hunk. Why did it return <code>True</code>, and why is containment the right rule rather than
+   overlap?</p>
+</div>
+
+<div class="q">
+<p><b>2.</b> In round 5, the parser was correct and the renderer was correct, yet the tool still reported
+   a SQL injection on the wrong line. Where did the corruption happen, and what does that tell you about
+   where to look when a pipeline produces wrong output but every component tests clean?</p>
+</div>
+
+<div class="q">
+<p><b>3.</b> <code>AgentResult</code> tracks <code>dropped_ungrounded</code> and
+   <code>dropped_malformed</code> as two separate integers. Why would merging them into one
+   <code>dropped</code> count be a downgrade — what would you no longer be able to tell?</p>
+</div>
+
+<p class="note">Answer these before starting M2. If any is unclear, the relevant code is
+   <code>src/prreview/diff.py</code> (Q1, Q2), <code>src/prreview/cli.py</code> (Q2) and
+   <code>src/prreview/contracts.py</code> (Q3).</p>
+
+</div>
+</body>
+</html>

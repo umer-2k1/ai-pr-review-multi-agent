@@ -226,15 +226,46 @@ def test_rendered_prompt_is_one_physical_line_per_source_line() -> None:
     """
     from prreview.diff import _LINE_SEPARATORS, render_for_prompt
 
-    body = "".join(f"+x{i} = 'a{sep}b'\n" for i, sep in enumerate(_LINE_SEPARATORS))
-    text = f"--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,{len(_LINE_SEPARATORS) + 1} @@\n ctx\n{body}"
+    # Hardcoded, NOT derived from _LINE_SEPARATORS: deriving it meant deleting a
+    # character from the constant also deleted it from this test's input, so the
+    # mutation survived the whole suite. The test must fail if the set shrinks.
+    expected = ["\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"]
+    assert sorted(_LINE_SEPARATORS) == sorted(expected), (
+        "the separator set changed; confirm the new set is still complete"
+    )
+
+    body = "".join(f"+x{i} = 'a{sep}b'\n" for i, sep in enumerate(expected))
+    text = f"--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,{len(expected) + 1} @@\n ctx\n{body}"
     rendered = render_for_prompt(parse_diff(text))
 
     assert len(rendered.split("\n")) == len(rendered.splitlines()), (
         "renderer emitted a character Python treats as a line break"
     )
-    for sep in _LINE_SEPARATORS:
+    for sep in expected:
         assert sep not in rendered, f"U+{ord(sep):04X} reached the prompt unescaped"
+
+
+class NoFindingsKeyLLM:
+    """Returns valid JSON of the wrong shape — no 'findings' key at all."""
+
+    def complete(self, system: str, user: str) -> LLMResponse:
+        return LLMResponse(text='{"result": "ok", "issues": []}', tokens=10)
+
+
+def test_missing_findings_key_is_a_schema_failure_not_a_clean_review() -> None:
+    """Pins BD-2's failure class at the envelope level.
+
+    `payload.get("findings", [])` made "the model returned some other shape" —
+    the likeliest structured-output failure — indistinguishable from "I looked
+    and found nothing". This behaviour was correct but unpinned: replacing the
+    raise with `return [], 0` passed the entire suite.
+    """
+    diff = parse_diff(FIXTURE.read_text())
+    result = SecuritySpecialist(NoFindingsKeyLLM()).review(diff)
+
+    assert result.ok is False, "a wrong-shaped envelope must fail the lane"
+    assert result.error is not None and "findings" in result.error
+    assert result.findings == ()
 
 
 def test_malformed_and_ungrounded_are_counted_separately() -> None:
