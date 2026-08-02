@@ -9,17 +9,34 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Callable
 
+from prreview.agents.base import Specialist
+from prreview.agents.docs import DocsSpecialist
+from prreview.agents.quality import QualitySpecialist
 from prreview.agents.security import SecuritySpecialist
-from prreview.contracts import AgentResult, Finding
+from prreview.agents.tests import TestsSpecialist
+from prreview.contracts import AgentResult, AgentType, Finding, Review
 from prreview.diff import parse_diff
 from prreview.llm import AnthropicLLM, LLMClient, OfflineLLM
+from prreview.orchestrator import run_review
 
-_AGENTS = {"security": SecuritySpecialist}
+# Typed as factories rather than `type[Specialist]`: the base is abstract, so a
+# mapping of the class objects reads to mypy as "may instantiate the ABC".
+_AGENTS: dict[str, Callable[[LLMClient], Specialist]] = {
+    "security": SecuritySpecialist,
+    "quality": QualitySpecialist,
+    "tests": TestsSpecialist,
+    "docs": DocsSpecialist,
+}
 
 
 def _client(agent: str, offline: bool) -> LLMClient:
     return OfflineLLM(agent_type=agent) if offline else AnthropicLLM()
+
+
+def _client_factory(offline: bool) -> Callable[[AgentType], LLMClient]:
+    return lambda at: _client(at.value, offline)
 
 
 def _finding_dict(f: Finding) -> dict[str, object]:
@@ -72,6 +89,67 @@ def _render_text(result: AgentResult) -> str:
     return "\n".join(lines)
 
 
+def _result_dict(result: AgentResult) -> dict[str, object]:
+    return {
+        "agent": result.agent_type.value,
+        "ok": result.ok,
+        "error": result.error,
+        "tokens": result.tokens,
+        "duration_ms": result.duration_ms,
+        "dropped_ungrounded": result.dropped_ungrounded,
+        "dropped_malformed": result.dropped_malformed,
+        "all_findings_were_hallucinated": result.all_findings_were_hallucinated,
+        "produced_nothing_usable": result.produced_nothing_usable,
+        "findings": [_finding_dict(f) for f in result.findings],
+    }
+
+
+def _review_dict(review: Review) -> dict[str, object]:
+    return {
+        "review_id": review.review_id,
+        "agents_run": [a.value for a in review.agents_run],
+        "agents_failed": [a.value for a in review.agents_failed],
+        "incomplete": review.incomplete,
+        "dropped_ungrounded": review.dropped_ungrounded,
+        "max_severity": review.max_severity.value if review.max_severity else None,
+        "findings": [_finding_dict(f) for f in review.findings],
+    }
+
+
+def _render_review(review: Review) -> str:
+    lines: list[str] = []
+    lines.append(f"review {review.review_id}")
+    lines.append(
+        f"agents run: {len(review.agents_run)}   findings: {len(review.findings)}"
+        + (f"   FAILED LANES: {', '.join(a.value for a in review.agents_failed)}"
+           if review.agents_failed else "")
+    )
+    if review.incomplete:
+        lines.append(
+            "WARNING: this review is INCOMPLETE — one or more specialists did not "
+            "finish. Absence of findings in those concerns is not evidence of absence."
+        )
+    if review.dropped_ungrounded:
+        lines.append(f"dropped: {review.dropped_ungrounded} ungrounded finding(s)")
+    lines.append("")
+    for f in review.findings:
+        agree = f"  [{f.agreement} lanes agree]" if f.agreement > 1 else ""
+        lines.append(
+            f"  [{f.severity.value.upper():8}] {f.file_path}:{f.line_start}  "
+            f"({f.category}, {f.agent_type.value}){agree}"
+        )
+        lines.append(f"             {f.summary}")
+        lines.append(f"             why: {f.rationale}")
+        if f.suggestion:
+            lines.append(f"             fix: {f.suggestion}")
+        lines.append(f"             confidence: {f.confidence:.2f}")
+        lines.append("")
+    if not review.findings:
+        lines.append("  no findings." if not review.incomplete
+                     else "  no findings from the lanes that completed.")
+    return "\n".join(lines)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     diff_path = Path(args.diff)
     if not diff_path.is_file():
@@ -113,28 +191,27 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"error: no files parsed from {diff_path} — is it a unified diff?", file=sys.stderr)
         return 2
 
-    agent_name = args.agent
-    specialist = _AGENTS[agent_name](_client(agent_name, args.offline))
-    result = specialist.review(diff)
+    # --agent runs one lane (M1 behaviour, kept for debugging a single concern).
+    # Without it, the full four-lane fan-out runs — that is the actual product.
+    if args.agent:
+        agent_name: str = args.agent
+        result = _AGENTS[agent_name](_client(agent_name, args.offline)).review(diff)
+        if args.json:
+            print(json.dumps(_result_dict(result), indent=2))
+        else:
+            print(_render_text(result))
+        # A specialist that failed is a failed run, even though it did not crash.
+        return 0 if result.ok else 1
 
+    review = run_review(diff, _client_factory(args.offline))
     if args.json:
-        print(json.dumps({
-            "agent": result.agent_type.value,
-            "ok": result.ok,
-            "error": result.error,
-            "tokens": result.tokens,
-            "duration_ms": result.duration_ms,
-            "dropped_ungrounded": result.dropped_ungrounded,
-            "dropped_malformed": result.dropped_malformed,
-            "all_findings_were_hallucinated": result.all_findings_were_hallucinated,
-            "produced_nothing_usable": result.produced_nothing_usable,
-            "findings": [_finding_dict(f) for f in result.findings],
-        }, indent=2))
+        print(json.dumps(_review_dict(review), indent=2))
     else:
-        print(_render_text(result))
+        print(_render_review(review))
 
-    # A specialist that failed is a failed run, even though it did not crash.
-    return 0 if result.ok else 1
+    # An incomplete review is not a clean review: exit 1 so CI cannot read a
+    # partially-failed fan-out as a pass.
+    return 1 if review.incomplete else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -143,7 +220,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="Review a diff.")
     run.add_argument("--diff", required=True, help="Path to a unified diff file.")
-    run.add_argument("--agent", default="security", choices=sorted(_AGENTS), help="Specialist to run.")
+    run.add_argument("--agent", default=None, choices=sorted(_AGENTS),
+                     help="Run ONE specialist instead of the full four-lane fan-out.")
     run.add_argument("--offline", action="store_true", help="Use the deterministic offline client (no network, no API key).")
     run.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     run.set_defaults(func=_cmd_run)

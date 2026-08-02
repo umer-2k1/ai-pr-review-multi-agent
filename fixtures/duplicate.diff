@@ -1,0 +1,14 @@
+diff --git a/app/handler.py b/app/handler.py
+index aaa1111..bbb2222 100644
+--- a/app/handler.py
++++ b/app/handler.py
+@@ -20,3 +20,9 @@ import os
+
+ def handle(event):
+     return {"ok": True}
++
++
++def risky(conn, raw):
++    cur = conn.cursor()
++    cur.execute(f"DELETE FROM t WHERE id = '{raw}'")
++    print("deleted", raw)
