@@ -17,9 +17,10 @@ and the row shape is fixed here rather than at the storage layer.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from prreview.contracts import AgentResult, AgentType
@@ -46,6 +47,9 @@ class Event:
     detail: dict[str, object] = field(default_factory=dict)
 
 
+_EVENT_FIELDS = {f.name for f in fields(Event)}
+
+
 class EventLog:
     """An append-only, monotonically-ordered event log for one process.
 
@@ -60,6 +64,9 @@ class EventLog:
         self._lock = threading.Lock()
         self._seq = 0
         self._events: list[Event] = []
+        # Set when the disk sink fails. The spine then continues in memory only.
+        self.write_error: str | None = None
+        self._warned = False
 
     def emit(
         self,
@@ -93,10 +100,31 @@ class EventLog:
             return event
 
     def _append_to_disk(self, event: Event) -> None:
+        """Append one row. A failure here degrades the log, never the review.
+
+        Observability must not be able to destroy the thing it observes. An
+        earlier version let an unwritable path (a read-only working directory, a
+        path whose parent is a file, `--events` pointing at a directory) escape as
+        an uncaught traceback — killing a fully-computed review because a log line
+        could not be written, and doing it on the *first* event, before any lane
+        had run. That inverts the point of the spine.
+
+        So: record the failure, warn once, and keep going in memory. The review
+        still prints; the operator still learns the log is broken.
+        """
         assert self.path is not None  # only called when path is set
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self.write_error = f"{type(exc).__name__}: {exc}"
+            if not self._warned:
+                self._warned = True
+                print(
+                    f"warning: events spine disabled — cannot write {self.path}: {exc}",
+                    file=sys.stderr,
+                )
 
     @property
     def events(self) -> list[Event]:
@@ -125,8 +153,15 @@ def read_log(path: Path) -> list[Event]:
             if not line:
                 continue
             try:
-                out.append(Event(**json.loads(line)))
-            except (json.JSONDecodeError, TypeError):
+                payload = json.loads(line)
+                if not isinstance(payload, dict):
+                    continue
+                # Drop unknown keys rather than the whole row: Event promises that
+                # new fields append, so a newer writer's rows must stay readable
+                # by an older reader.
+                known = {k: v for k, v in payload.items() if k in _EVENT_FIELDS}
+                out.append(Event(**known))
+            except (json.JSONDecodeError, TypeError, ValueError):
                 continue
     return out
 
@@ -141,13 +176,15 @@ def format_trace(events: list[Event]) -> str:
     if not events:
         return "no events recorded."
     lines: list[str] = []
-    first, last = events[0], events[-1]
-    wall_ms = int((last.ts - first.ts) * 1000)
+    # Never negative, even if rows arrive out of order or the clock stepped back.
+    stamps = [e.ts for e in events]
+    first = events[0]
+    wall_ms = max(0, int((max(stamps) - min(stamps)) * 1000))
     lines.append(f"trace for review {first.review_id}   ({len(events)} events, {wall_ms}ms wall)")
     lines.append("")
     lines.append(f"  {'seq':>3}  {'+ms':>6}  {'event':<18} {'lane':<9} {'tok':>6}  detail")
     for e in events:
-        rel = int((e.ts - first.ts) * 1000)
+        rel = max(0, int((e.ts - min(stamps)) * 1000))
         bits: list[str] = []
         if e.ok is False:
             bits.append(f"FAILED: {e.error}")

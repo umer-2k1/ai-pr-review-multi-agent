@@ -264,9 +264,14 @@ def _cmd_trace(args: argparse.Namespace) -> int:
 
     review_id = args.review_id
     if args.last or review_id is None:
-        review_id = latest_review_id(path)
+        # Derived from the rows already read, not a second read of the file.
+        review_id = events[-1].review_id
 
-    selected = [e for e in events if e.review_id == review_id]
+    # Sort by seq, not file order. `seq` is the authoritative ordering — it is
+    # assigned under a lock precisely because wall-clock and arrival order are
+    # not trustworthy — so the trace must not inherit whatever order the lines
+    # happen to sit in.
+    selected = sorted((e for e in events if e.review_id == review_id), key=lambda e: e.seq)
     if not selected:
         print(f"no events for review {review_id} in {path}", file=sys.stderr)
         return 2

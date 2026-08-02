@@ -57,6 +57,31 @@ class TestOrdering:
         seqs = sorted(e.seq for e in log.events)
         assert seqs == list(range(1, 801)), "concurrent emits lost or duplicated a sequence number"
 
+    def test_on_disk_order_matches_seq_order_under_concurrency(self, tmp_path: Path) -> None:
+        """The property design decision #1 exists to guarantee.
+
+        The disk append sits inside the lock, so file order == seq order. Moving
+        it outside still produced a correct in-memory sequence — so this needs
+        its own test: `trace` renders rows in the order it reads them, and a
+        divergence would render an out-of-order trace.
+        """
+        path = tmp_path / "events.jsonl"
+        log = EventLog(path=path)
+
+        def hammer() -> None:
+            for _ in range(60):
+                log.emit("r", "tick")
+
+        threads = [threading.Thread(target=hammer) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        disk_seqs = [json.loads(line)["seq"] for line in path.read_text().splitlines() if line]
+        assert len(disk_seqs) == 360
+        assert disk_seqs == sorted(disk_seqs), "on-disk order diverged from seq order"
+
     def test_concurrent_emits_do_not_lose_rows(self) -> None:
         log = EventLog()
         threads = [

@@ -156,6 +156,101 @@ def test_draft_is_emitted_even_when_the_gate_holds(capsys: pytest.CaptureFixture
     assert "finding(s)" in out, "HOLD suppressed the findings a human needs to read"
 
 
+class TestEventsSpineCLI:
+    """M4's CLI wiring. Previously untested end to end — deleting the
+    `gate_decided` emit, or the total-cost line, left the whole suite green."""
+
+    def test_m4_demo_command(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        events = tmp_path / "events.jsonl"
+        assert main(["run", "--diff", "fixtures/sample.diff", "--offline",
+                     "--events", str(events)]) == 0
+        capsys.readouterr()
+
+        code, out = _run(["trace", "--last", "--events", str(events)], capsys)
+        assert code == 0
+        assert "total tokens:" in out, "M4 requires the total cost to be printed"
+
+    def test_a_full_run_emits_at_least_seven_rows(self, tmp_path: Path) -> None:
+        """The stated criterion. The orchestrator alone emits 6; the 7th is the
+        gate decision, which only the CLI knows about."""
+        from prreview.events import read_log
+
+        events = tmp_path / "events.jsonl"
+        main(["run", "--diff", "fixtures/sample.diff", "--offline", "--events", str(events)])
+
+        rows = read_log(events)
+        assert len(rows) >= 7, f"only {len(rows)} rows; the gate decision is missing"
+        assert any(e.event_type == "gate_decided" for e in rows)
+        assert [e.seq for e in rows] == sorted(e.seq for e in rows)
+
+    def test_every_row_carries_the_required_fields(self, tmp_path: Path) -> None:
+        from prreview.events import read_log
+
+        events = tmp_path / "events.jsonl"
+        main(["run", "--diff", "fixtures/sample.diff", "--offline", "--events", str(events)])
+        for e in read_log(events):
+            assert e.review_id and e.event_type
+            assert e.tokens >= 0 and e.duration_ms >= 0
+
+    def test_all_rows_share_one_review_id(self, tmp_path: Path) -> None:
+        from prreview.events import read_log
+
+        events = tmp_path / "events.jsonl"
+        main(["run", "--diff", "fixtures/sample.diff", "--offline", "--events", str(events)])
+        assert len({e.review_id for e in read_log(events)}) == 1
+
+    def test_no_events_flag_writes_nothing(self, tmp_path: Path) -> None:
+        events = tmp_path / "events.jsonl"
+        assert main(["run", "--diff", "fixtures/sample.diff", "--offline",
+                     "--no-events", "--events", str(events)]) == 0
+        assert not events.exists()
+
+    def test_trace_on_an_empty_log_exits_2(self, tmp_path: Path) -> None:
+        assert main(["trace", "--last", "--events", str(tmp_path / "nope.jsonl")]) == 2
+
+    def test_trace_selects_by_review_id(self, tmp_path: Path,
+                                        capsys: pytest.CaptureFixture[str]) -> None:
+        from prreview.events import read_log
+
+        events = tmp_path / "events.jsonl"
+        main(["run", "--diff", "fixtures/sample.diff", "--offline", "--events", str(events)])
+        main(["run", "--diff", "fixtures/critical.diff", "--offline", "--events", str(events)])
+        capsys.readouterr()
+
+        first_id = read_log(events)[0].review_id
+        code, out = _run(["trace", "--review-id", first_id, "--events", str(events)], capsys)
+        assert code == 0
+        assert first_id in out
+
+    def test_an_unwritable_events_path_does_not_destroy_the_review(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """BD-1 regression.
+
+        Observability must not be able to destroy the thing it observes. A
+        read-only working directory used to kill a fully-computed review with an
+        uncaught PermissionError — on the FIRST event, before any lane ran.
+        """
+        blocked = tmp_path / "a-file-not-a-dir"
+        blocked.write_text("i am a file")
+        target = blocked / "events.jsonl"  # parent is a file: mkdir must fail
+
+        code, out = _run(["run", "--diff", "fixtures/sample.diff", "--offline",
+                          "--events", str(target)], capsys)
+
+        assert code == 0, "a logging failure killed the run"
+        assert "app/db.py" in out, "the review was discarded because a log line failed"
+
+    def test_the_operator_is_told_the_spine_is_broken(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        blocked = tmp_path / "blocker"
+        blocked.write_text("x")
+        main(["run", "--diff", "fixtures/sample.diff", "--offline",
+              "--events", str(blocked / "e.jsonl")])
+        assert "events spine disabled" in capsys.readouterr().err
+
+
 def test_missing_file_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["run", "--diff", str(tmp_path / "nope.diff"), "--offline"]) == 2
 
