@@ -115,8 +115,3 @@ def aggregate(review_id: str, results: list[AgentResult]) -> Review:
         incomplete=bool(failed),
         dropped_ungrounded=sum(r.dropped_ungrounded for r in results),
     )
-
-
-def lanes_reporting_nothing_usable(results: list[AgentResult]) -> list[AgentType]:
-    """Lanes that emitted findings and kept none — a malfunction, not a clean lane."""
-    return [r.agent_type for r in results if r.produced_nothing_usable]

@@ -74,7 +74,12 @@ def decide(
     # threshold decision: the consequence of being wrong about a missed SQL
     # injection is categorically different from being wrong about a style nit,
     # and the study's own HITL spectrum picks the level from consequence first.
-    if any(f.severity is Severity.CRITICAL for f in findings):
+    # `==` not `is`: identity comparison would silently miss a raw string that
+    # bypassed enum coercion. No production path does that today — every Finding
+    # is built through Severity(...) under pydantic validation — but the gate is
+    # the last thing standing between a CRITICAL finding and an unread draft, so
+    # it should not depend on an invariant enforced somewhere else.
+    if any(f.severity == Severity.CRITICAL for f in findings):
         return HitlVerdict.HOLD, "a CRITICAL finding is present"
 
     if failed_lanes:

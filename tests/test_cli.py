@@ -124,6 +124,38 @@ def test_complete_review_exits_0() -> None:
     assert main(["run", "--diff", "fixtures/sample.diff", "--offline"]) == 0
 
 
+def test_m3_demo_command(capsys: pytest.CaptureFixture[str]) -> None:
+    """M3's contractual demo command, asserted rather than eyeballed.
+
+    Previously unpinned: no CLI-level test asserted the gate fields at all.
+    """
+    code, out = _run(["run", "--diff", "fixtures/critical.diff", "--offline", "--json"], capsys)
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["hitl_verdict"] == "HOLD"
+    assert payload["max_severity"] == "critical"
+    assert "CRITICAL" in payload["hitl_reason"]
+    # The point of the criterion: it holds DESPITE high confidence.
+    assert payload["overall_confidence"] > 0.7
+
+
+def test_draft_output_is_produced_and_says_a_human_must_approve(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, out = _run(["run", "--diff", "fixtures/critical.diff", "--offline", "--draft"], capsys)
+    assert code == 0
+    assert "HOLD" in out
+    assert "human must approve" in out.lower()
+    assert "app/auth.py" in out
+
+
+def test_draft_is_emitted_even_when_the_gate_holds(capsys: pytest.CaptureFixture[str]) -> None:
+    """Withholding the draft on HOLD would defeat the gate: the whole point is
+    that a person reads it."""
+    _, out = _run(["run", "--diff", "fixtures/critical.diff", "--offline", "--draft"], capsys)
+    assert "finding(s)" in out, "HOLD suppressed the findings a human needs to read"
+
+
 def test_missing_file_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["run", "--diff", str(tmp_path / "nope.diff"), "--offline"]) == 2
 

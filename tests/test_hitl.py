@@ -160,10 +160,51 @@ class TestEndToEnd:
         assert review.hitl_verdict is HitlVerdict.HOLD
         assert "CRITICAL" in review.hitl_reason
 
-    def test_aggregate_populates_the_gate_fields(self) -> None:
-        review = aggregate("r", [AgentResult(agent_type=AgentType.SECURITY, findings=(_f(),))])
-        assert review.overall_confidence > 0
+    def test_aggregate_populates_the_gate_fields_with_the_computed_value(self) -> None:
+        """Asserts the actual number, not merely `> 0`.
+
+        The weaker assertion survived a mutation that hardcoded
+        `overall_confidence=1.0` — which would present a shaky review as certain.
+        """
+        review = aggregate("r", [AgentResult(agent_type=AgentType.SECURITY, findings=(
+            _f(confidence=0.90, line=1), _f(confidence=0.80, line=2),
+        ))])
+        assert review.overall_confidence == pytest.approx(0.85)
         assert review.hitl_reason != ""
+
+    def test_a_lane_that_kept_nothing_is_wired_through_to_the_gate(self) -> None:
+        """The wiring, not just the branch.
+
+        `decide()`'s nothing-usable branch was tested in isolation, but nothing
+        pinned that `AgentResult.produced_nothing_usable` actually reaches it —
+        the mutation `lanes_nothing_usable=0` survived the whole suite.
+        """
+        results = [
+            AgentResult(agent_type=AgentType.SECURITY, findings=(_f(confidence=0.99),)),
+            # emitted findings, kept none of them: a malfunction, not a clean lane
+            AgentResult(agent_type=AgentType.QUALITY, ok=True, dropped_ungrounded=3),
+        ]
+        review = aggregate("r", results)
+        assert review.hitl_verdict is HitlVerdict.HOLD
+        assert "kept none" in review.hitl_reason
+
+    def test_malformed_only_lane_also_reaches_the_gate(self) -> None:
+        results = [
+            AgentResult(agent_type=AgentType.SECURITY, findings=(_f(confidence=0.99),)),
+            AgentResult(agent_type=AgentType.DOCS, ok=True, dropped_malformed=2),
+        ]
+        review = aggregate("r", results)
+        assert review.hitl_verdict is HitlVerdict.HOLD
+        assert "kept none" in review.hitl_reason
+
+    def test_review_defaults_to_hold_when_the_gate_is_not_set(self) -> None:
+        """The safe default is load-bearing: anything constructing a Review
+        without running the gate must not claim it is ready to post."""
+        from prreview.contracts import Review
+
+        bare = Review(review_id="x")
+        assert bare.hitl_verdict is HitlVerdict.HOLD
+        assert bare.overall_confidence == 0.0
 
     def test_incomplete_review_never_reaches_draft_ready(self) -> None:
         results = [
