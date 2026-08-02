@@ -1,0 +1,35 @@
+[project]
+name = "prreview"
+version = "0.1.0"
+description = "Multi-agent PR reviewer: four specialists fan out over a diff, an aggregator merges and gates."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "mypy"]
+llm = ["anthropic>=0.40"]
+
+[project.scripts]
+pr-review = "prreview.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+# The optional anthropic SDK is only imported inside the live client.
+[[tool.mypy.overrides]]
+module = "anthropic.*"
+ignore_missing_imports = true

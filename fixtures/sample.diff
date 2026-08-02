@@ -1,0 +1,31 @@
+diff --git a/app/db.py b/app/db.py
+index 1a2b3c4..5d6e7f8 100644
+--- a/app/db.py
++++ b/app/db.py
+@@ -10,6 +10,14 @@ import sqlite3
+
+ def get_connection():
+     return sqlite3.connect("app.db")
++
++
++def find_user(conn, username):
++    cur = conn.cursor()
++    cur.execute(f"SELECT * FROM users WHERE name = '{username}'")
++    return cur.fetchone()
++
++API_KEY = "sk-live-9f8a7b6c5d4e3f2a1b0c"
+diff --git a/app/client.py b/app/client.py
+index 2b3c4d5..6e7f8a9 100644
+--- a/app/client.py
++++ b/app/client.py
+@@ -4,5 +4,12 @@ import requests
+
+ BASE = "https://api.example.com"
+
++
++def fetch_profile(user_id):
++    resp = requests.get(f"{BASE}/users/{user_id}")
++    print("fetched", resp.status_code)
++    return resp.json()
++
++# TODO: handle pagination
