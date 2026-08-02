@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from dataclasses import asdict
@@ -27,6 +28,7 @@ from prreview.events import (
     latest_review_id,
     read_log,
 )
+from prreview.github import GitHubError, fetch_pr_diff
 from prreview.hitl import render_draft
 from prreview.llm import AnthropicLLM, LLMClient, OfflineLLM
 from prreview.orchestrator import run_review
@@ -171,12 +173,24 @@ def _render_review(review: Review) -> str:
     return "\n".join(lines)
 
 
-def _cmd_run(args: argparse.Namespace) -> int:
+def _load_diff_text(args: argparse.Namespace) -> tuple[str | None, int]:
+    """Return (diff text, exit code). Exactly one source: --diff or --pr."""
+    if args.pr:
+        if not args.repo:
+            print("error: --pr requires --repo OWNER/NAME", file=sys.stderr)
+            return None, 2
+        try:
+            return fetch_pr_diff(args.repo, args.pr, timeout_s=args.timeout), 0
+        except GitHubError as exc:
+            # Cannot fetch is bad input, not a failed lane — exit 2, so CI can
+            # tell "we could not look" from "we looked and a specialist died".
+            print(f"error: {exc}", file=sys.stderr)
+            return None, 2
+
     diff_path = Path(args.diff)
     if not diff_path.is_file():
         print(f"error: no such diff file: {diff_path}", file=sys.stderr)
-        return 2
-
+        return None, 2
     try:
         # newline="" disables universal-newline translation. Without it Python
         # rewrites a lone \r anywhere in the file to \n *before* the parser runs,
@@ -190,12 +204,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # >=3.11, so go through open() to stay portable.
         with diff_path.open("r", newline="") as handle:
             diff_text = handle.read()
+        return diff_text, 0
     except (OSError, UnicodeDecodeError) as exc:
         # Bad input is exit 2, same as every other bad-input branch. Letting this
         # traceback out would exit 1, which is the "a lane failed" code — two very
         # different problems must not share an exit status.
         print(f"error: cannot read {diff_path}: {exc}", file=sys.stderr)
-        return 2
+        return None, 2
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    diff_text, code = _load_diff_text(args)
+    if diff_text is None:
+        return code
+    source = f"{args.repo}#{args.pr}" if args.pr else args.diff
 
     diff = parse_diff(diff_text)
     if not diff.files:
@@ -206,10 +228,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
             for line in diff_text.split("\n")
         )
         if looks_like_a_diff:
-            print(f"note: {diff_path} contains no reviewable post-image lines "
+            print(f"note: {source} contains no reviewable post-image lines "
                   f"(deletions only, or an unsupported combined/merge diff).", file=sys.stderr)
             return 0
-        print(f"error: no files parsed from {diff_path} — is it a unified diff?", file=sys.stderr)
+        print(f"error: no files parsed from {source} — is it a unified diff?", file=sys.stderr)
         return 2
 
     # --agent runs one lane (M1 behaviour, kept for debugging a single concern).
@@ -288,7 +310,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="Review a diff.")
-    run.add_argument("--diff", required=True, help="Path to a unified diff file.")
+    src = run.add_mutually_exclusive_group(required=True)
+    src.add_argument("--diff", help="Path to a unified diff file.")
+    src.add_argument("--pr", type=int, help="Pull request number to fetch (read-only).")
+    run.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"),
+                     help="OWNER/NAME. Defaults to $GITHUB_REPOSITORY.")
+    run.add_argument("--timeout", type=float, default=30.0,
+                     help="Timeout in seconds for the GitHub fetch.")
     run.add_argument("--agent", default=None, choices=sorted(_AGENTS),
                      help="Run ONE specialist instead of the full four-lane fan-out.")
     run.add_argument("--offline", action="store_true", help="Use the deterministic offline client (no network, no API key).")

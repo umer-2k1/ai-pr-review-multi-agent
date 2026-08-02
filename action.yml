@@ -1,0 +1,126 @@
+name: "Multi-agent PR review"
+description: >-
+  Fans a pull-request diff out to four specialist reviewers (security, quality,
+  tests, docs), merges their findings, and publishes a DRAFT review to the job
+  summary. It never posts to the pull request — a human approves and posts.
+author: "umer-2k1"
+
+branding:
+  icon: "eye"
+  color: "purple"
+
+inputs:
+  pr:
+    description: "Pull request number. Defaults to the triggering PR."
+    required: false
+    default: ""
+  repo:
+    description: "OWNER/NAME. Defaults to the current repository."
+    required: false
+    default: ""
+  github-token:
+    description: >-
+      Token used to READ the pull request diff. Grant `pull-requests: read`
+      only. This action has no write path; a write-scoped token would grant
+      nothing and widen the blast radius for no benefit.
+    required: false
+    default: ""
+  anthropic-api-key:
+    description: "Anthropic API key. Omit to run in --offline mode."
+    required: false
+    default: ""
+  offline:
+    description: "Run the deterministic offline reviewer (no API key, no network)."
+    required: false
+    default: "false"
+  fail-on-critical:
+    description: >-
+      Fail the job when the review is held for a human. Default false: this
+      reviewer drafts, it does not gate merges, and a noisy first week should
+      not block the team.
+    required: false
+    default: "false"
+
+outputs:
+  verdict:
+    description: "DRAFT_READY or HOLD."
+    value: ${{ steps.review.outputs.verdict }}
+  confidence:
+    description: "Overall confidence, 0.0-1.0."
+    value: ${{ steps.review.outputs.confidence }}
+  findings:
+    description: "Number of findings after deduplication."
+    value: ${{ steps.review.outputs.findings }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install pr-review
+      shell: bash
+      run: pip install --quiet "${{ github.action_path }}"
+
+    - name: Review the pull request
+      id: review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        GITHUB_REPOSITORY: ${{ inputs.repo || github.repository }}
+      run: |
+        set -euo pipefail
+        PR="${{ inputs.pr }}"
+        if [ -z "$PR" ]; then
+          PR="${{ github.event.pull_request.number }}"
+        fi
+        if [ -z "$PR" ]; then
+          echo "::error::no pull request number available"
+          exit 2
+        fi
+
+        OFFLINE=""
+        if [ "${{ inputs.offline }}" = "true" ]; then OFFLINE="--offline"; fi
+
+        # Exit 1 means a specialist lane failed — the review is incomplete but
+        # real. Do not abort on it; the draft still has value and the summary
+        # says which lane died. Exit 2 is bad input and does abort.
+        set +e
+        pr-review run --pr "$PR" $OFFLINE --json > review.json
+        RC=$?
+        set -e
+        if [ "$RC" -ge 2 ]; then
+          echo "::error::pr-review could not read the pull request (exit $RC)"
+          exit "$RC"
+        fi
+
+        VERDICT=$(python -c "import json;print(json.load(open('review.json'))['hitl_verdict'])")
+        CONF=$(python -c "import json;print(json.load(open('review.json'))['overall_confidence'])")
+        COUNT=$(python -c "import json;print(len(json.load(open('review.json'))['findings']))")
+        echo "verdict=$VERDICT"    >> "$GITHUB_OUTPUT"
+        echo "confidence=$CONF"    >> "$GITHUB_OUTPUT"
+        echo "findings=$COUNT"     >> "$GITHUB_OUTPUT"
+
+        pr-review run --pr "$PR" $OFFLINE --draft >> "$GITHUB_STEP_SUMMARY"
+        pr-review trace --last >> trace.txt 2>/dev/null || true
+
+        if [ "$RC" -eq 1 ]; then
+          echo "::warning::the review is INCOMPLETE — a specialist lane did not finish"
+        fi
+        if [ "$VERDICT" = "HOLD" ] && [ "${{ inputs.fail-on-critical }}" = "true" ]; then
+          echo "::error::review held for a human ($COUNT findings, confidence $CONF)"
+          exit 1
+        fi
+
+    - name: Upload the draft and trace
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: pr-review-${{ github.event.pull_request.number || 'manual' }}
+        path: |
+          review.json
+          trace.txt
+        if-no-files-found: ignore

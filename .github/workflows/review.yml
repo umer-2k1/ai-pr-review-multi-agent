@@ -1,0 +1,59 @@
+name: PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to review"
+        required: true
+
+# INV-4 enforced at the credential layer, not only in code.
+#
+# `pull-requests: read` and nothing else. The agent's autonomy level is "human
+# reviews output" (study §0.3 level 2), and a token that cannot write is a
+# guarantee no bug can undo — unlike a code path, which can be changed by
+# accident. There is deliberately no `pull-requests: write` here even though it
+# would enable auto-posting: that is the decision, not an oversight.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  # A new push supersedes the review of the previous one.
+  group: pr-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # A hung job costs money and blocks the queue. The per-lane deadline in the
+    # orchestrator is the first line of defence; this is the backstop.
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the reviewer
+        uses: actions/checkout@v4
+
+      - name: Review
+        id: review
+        uses: ./
+        with:
+          pr: ${{ github.event.pull_request.number || inputs.pr }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # No key configured? Fall back to the deterministic offline reviewer so
+          # the pipeline still proves itself end to end rather than silently
+          # skipping.
+          offline: ${{ secrets.ANTHROPIC_API_KEY == '' }}
+
+      - name: Report
+        if: always()
+        run: |
+          echo "verdict:    ${{ steps.review.outputs.verdict }}"
+          echo "confidence: ${{ steps.review.outputs.confidence }}"
+          echo "findings:   ${{ steps.review.outputs.findings }}"
+          echo ""
+          echo "The draft review is in the job summary above."
+          echo "Nothing has been posted to the pull request — a human posts it."
