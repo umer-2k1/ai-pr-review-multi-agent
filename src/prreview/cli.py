@@ -16,8 +16,9 @@ from prreview.agents.docs import DocsSpecialist
 from prreview.agents.quality import QualitySpecialist
 from prreview.agents.security import SecuritySpecialist
 from prreview.agents.tests import TestsSpecialist
-from prreview.contracts import AgentResult, AgentType, Finding, Review
+from prreview.contracts import AgentResult, AgentType, Finding, HitlVerdict, Review
 from prreview.diff import parse_diff
+from prreview.hitl import render_draft
 from prreview.llm import AnthropicLLM, LLMClient, OfflineLLM
 from prreview.orchestrator import run_review
 
@@ -110,6 +111,9 @@ def _review_dict(review: Review) -> dict[str, object]:
         "agents_run": [a.value for a in review.agents_run],
         "agents_failed": [a.value for a in review.agents_failed],
         "incomplete": review.incomplete,
+        "overall_confidence": review.overall_confidence,
+        "hitl_verdict": review.hitl_verdict.value,
+        "hitl_reason": review.hitl_reason,
         "dropped_ungrounded": review.dropped_ungrounded,
         "max_severity": review.max_severity.value if review.max_severity else None,
         "findings": [_finding_dict(f) for f in review.findings],
@@ -124,6 +128,12 @@ def _render_review(review: Review) -> str:
         + (f"   FAILED LANES: {', '.join(a.value for a in review.agents_failed)}"
            if review.agents_failed else "")
     )
+    lines.append(
+        f"confidence: {review.overall_confidence:.2f}   "
+        f"gate: {review.hitl_verdict.value} — {review.hitl_reason}"
+    )
+    if review.hitl_verdict is HitlVerdict.DRAFT_READY:
+        lines.append("A human must still approve this draft before it is posted.")
     if review.incomplete:
         lines.append(
             "WARNING: this review is INCOMPLETE — one or more specialists did not "
@@ -204,7 +214,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 0 if result.ok else 1
 
     review = run_review(diff, _client_factory(args.offline))
-    if args.json:
+    if args.draft:
+        # The markdown a human reads before deciding to post it. Produced for
+        # HOLD as well as DRAFT_READY — the point of the gate is that a person
+        # reads the draft, so withholding it on HOLD would defeat the gate.
+        print(render_draft(
+            review.review_id, list(review.findings), review.hitl_verdict, review.hitl_reason
+        ))
+    elif args.json:
         print(json.dumps(_review_dict(review), indent=2))
     else:
         print(_render_review(review))
@@ -224,6 +241,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Run ONE specialist instead of the full four-lane fan-out.")
     run.add_argument("--offline", action="store_true", help="Use the deterministic offline client (no network, no API key).")
     run.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
+    run.add_argument("--draft", action="store_true",
+                     help="Emit the markdown draft review for a human to approve.")
     run.set_defaults(func=_cmd_run)
 
     return parser

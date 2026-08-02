@@ -21,6 +21,7 @@ from prreview.contracts import (
     Review,
     Severity,
 )
+from prreview.hitl import compute_confidence, count_lanes_nothing_usable, decide
 
 
 def _worst(*severities: Severity) -> Severity:
@@ -95,11 +96,22 @@ def aggregate(review_id: str, results: list[AgentResult]) -> Review:
 
     merged = sort_findings(dedupe([f for r in ok for f in r.findings]))
 
+    confidence = compute_confidence(merged, len(failed))
+    verdict, reason = decide(
+        merged,
+        failed_lanes=len(failed),
+        lanes_nothing_usable=count_lanes_nothing_usable(results),
+        confidence=confidence,
+    )
+
     return Review(
         review_id=review_id,
         findings=tuple(merged),
         agents_run=tuple(r.agent_type for r in results),
         agents_failed=tuple(failed),
+        overall_confidence=confidence,
+        hitl_verdict=verdict,
+        hitl_reason=reason,
         incomplete=bool(failed),
         dropped_ungrounded=sum(r.dropped_ungrounded for r in results),
     )

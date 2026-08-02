@@ -162,6 +162,9 @@ class Review(BaseModel):
     agents_failed: tuple[AgentType, ...] = ()
     overall_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     hitl_verdict: HitlVerdict = HitlVerdict.HOLD
+    # Why the gate fired. Part of the contract, not decoration: a gate that
+    # holds without saying why trains people to click through it.
+    hitl_reason: str = ""
     incomplete: bool = False
     dropped_ungrounded: int = 0
 

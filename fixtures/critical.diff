@@ -1,0 +1,14 @@
+diff --git a/app/auth.py b/app/auth.py
+index ccc3333..ddd4444 100644
+--- a/app/auth.py
++++ b/app/auth.py
+@@ -5,4 +5,10 @@ import hashlib
+
+ def hash_pw(p):
+     return hashlib.sha256(p.encode()).hexdigest()
++
++
++def run_plugin(name, payload):
++    return eval(payload)
++
++ADMIN_TOKEN = "sk-admin-0011223344556677"
