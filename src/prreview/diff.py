@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 # @@ -old_start,old_count +new_start,new_count @@
 _HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-_NEW_FILE_RE = re.compile(r"^\+\+\+ (?:b/)?(.+?)\s*$")
+_NEW_FILE_RE = re.compile(r"^\+\+\+ (.+?)[ \t]*$")
 # Combined diff (`git show` on a merge): @@@ -1,3 -1,3 +1,4 @@@. Three-way format,
 # not what a two-dot PR diff looks like. Detected so it can be skipped loudly
 # rather than silently misparsed into a file with zero hunks.
@@ -80,6 +80,26 @@ class Diff:
         return [f.path for f in self.files]
 
 
+def _clean_path(raw: str) -> str:
+    """Normalise a path from a `+++` header.
+
+    git quotes paths containing non-ASCII or special characters and escapes them
+    octally: `+++ "b/wei\\303\\237.txt"`. Left as-is, a finding on such a file
+    carries a path that matches nothing.
+    """
+    path = raw.strip()
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        try:
+            path = path[1:-1].encode("latin-1").decode("unicode_escape")
+            path = path.encode("latin-1").decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            path = raw.strip()[1:-1]
+    for prefix in ("a/", "b/"):
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    return path
+
+
 def parse_diff(text: str) -> Diff:
     """Parse a unified diff into files and post-image hunk ranges.
 
@@ -104,13 +124,70 @@ def parse_diff(text: str) -> Diff:
     old_left = 0
     new_left = 0
 
-    for raw in text.splitlines():
+    # The hunk currently being consumed, as (file, index-into-its-hunks, start).
+    # Its `end` is provisional until the body has been read — see _settle().
+    pending: tuple[FileDiff, int, int] | None = None
+    skipping = False
+
+    def _settle() -> None:
+        """Replace a hunk's declared extent with the extent actually consumed.
+
+        The header's counts bound the *body*, but they cannot be trusted to define
+        the *grounded range*, because a header can disagree with its body:
+
+        * Over-declared (`@@ -1,200 +1,220 @@` with two body lines) — routine for
+          truncated patches, e.g. GitHub's per-file `patch` field on a large file,
+          or `git diff | head`. The header claimed 220 lines, so `is_grounded`
+          accepted line 219, which the parser never saw. A false accept on INV-3,
+          and a direct contradiction of M1's "verified present in the parsed diff".
+        * Under-declared (`@@ -1,3 +1,1 @@` with a 4-line body) — the parser reads
+          line 2, shows line 2 to the model, then rejects a correct finding on
+          line 2 as ungrounded. A false reject.
+
+        On a well-formed diff the consumed extent equals the declared extent, so
+        this is a no-op on valid input. It only bites when the header lies.
+        """
+        nonlocal pending
+        if pending is None:
+            return
+        fd, idx, start = pending
+        seen_end = new_line - 1
+        if seen_end >= start:
+            fd.hunks[idx] = Hunk(start=start, end=seen_end)
+        elif 0 <= idx < len(fd.hunks):
+            # Body contributed no new-side lines at all (pure deletion): the hunk
+            # grounds nothing, so remove it rather than leave a phantom range.
+            fd.hunks.pop(idx)
+        pending = None
+
+    # `str.splitlines()` is wrong here: it also breaks on \x0b \x0c \x1c \x1d \x1e
+    # \x85    , which are *content* in a diff, not line terminators. A
+    # form-feed page break (a documented convention in GNU C, Emacs Lisp and
+    # PEP 8) or a   in a JS string would split one added line into two —
+    # truncating the recorded content, shifting every later line number, and
+    # corrupting the body counters. Same failure class as BD-1, different door,
+    # and worse: the shifted line still lands inside the declared hunk, so
+    # is_grounded() returns True and INV-3 reports a false green.
+    lines = [ln.rstrip("\r") for ln in text.split("\n")]
+    if lines and lines[-1] == "":
+        lines.pop()
+
+    for raw in lines:
         in_hunk = old_left > 0 or new_left > 0
 
         if not in_hunk:
+            if pending is not None:
+                _settle()
+
+            if raw.startswith("diff --git") or raw.startswith("--- "):
+                skipping = False
+
+            if skipping:
+                continue
+
             m_file = _NEW_FILE_RE.match(raw)
             if raw.startswith("+++ ") and m_file:
-                path = m_file.group(1)
+                path = _clean_path(m_file.group(1))
                 if path == "/dev/null":  # deleted file — nothing to review
                     current = None
                     continue
@@ -119,13 +196,15 @@ def parse_diff(text: str) -> Diff:
                 continue
 
             if _COMBINED_HUNK_RE.match(raw):
-                # Combined/merge diff (`git show` on a merge). There is no single
-                # post-image to cite, so refuse the file outright rather than
-                # misparse it. Dropping it — instead of leaving a hunk-less shell —
-                # keeps `diff.paths` honest about what was actually reviewed.
+                # Combined/merge diff (`git show --cc` on a merge). There is no
+                # single post-image to cite, so refuse the file outright rather
+                # than misparse it. `skipping` suppresses the body too: a combined
+                # body line beginning "+ " renders as "+++ …" and would otherwise
+                # invent a phantom path.
                 if current is not None and current in diff.files:
                     diff.files.remove(current)
                 current = None
+                skipping = True
                 continue
 
             if raw.startswith("@@"):
@@ -134,11 +213,11 @@ def parse_diff(text: str) -> Diff:
                     old_count = int(m_hunk.group(2)) if m_hunk.group(2) is not None else 1
                     start = int(m_hunk.group(3))
                     count = int(m_hunk.group(4)) if m_hunk.group(4) is not None else 1
-                    # A zero-length hunk still anchors at `start`.
-                    end = start + max(count, 1) - 1
-                    current.hunks.append(Hunk(start=start, end=end))
                     new_line = start
                     old_left, new_left = old_count, count
+                    if count > 0:
+                        current.hunks.append(Hunk(start=start, end=start + count - 1))
+                        pending = (current, len(current.hunks) - 1, start)
                 continue
             continue
 
@@ -165,6 +244,7 @@ def parse_diff(text: str) -> Diff:
             old_left -= 1
             new_left -= 1
 
+    _settle()  # a diff truncated mid-hunk still gets an honest range
     return diff
 
 

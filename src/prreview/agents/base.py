@@ -41,6 +41,26 @@ Rules:
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
+def _as_line_number(value: object) -> int:
+    """Coerce a line number, rejecting anything that is not exactly an integer.
+
+    `int(10.7)` silently floors to 10 — a *different line* than the model named.
+    A model that cannot emit an integer line number has produced a malformed
+    finding, and it should be counted as one rather than quietly relocated.
+    """
+    if isinstance(value, bool):
+        raise ValueError("line number is a bool")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise ValueError(f"line number {value} is not an integer")
+        return int(value)
+    if isinstance(value, str):
+        return int(value.strip())  # raises ValueError on anything non-integral
+    raise ValueError(f"line number has unusable type {type(value).__name__}")
+
+
 class Specialist(ABC):
     """One grounded reasoner over a diff."""
 
@@ -121,7 +141,12 @@ class Specialist(ABC):
         if not match:
             raise ValueError("no JSON object in model output")
         payload = json.loads(match.group(0))
-        items = payload.get("findings", [])
+        if not isinstance(payload, dict) or "findings" not in payload:
+            # A missing key is a schema failure, not an empty review. Defaulting
+            # to [] made the likeliest model error ("I returned some other shape")
+            # indistinguishable from "I looked and found nothing".
+            raise ValueError("model output has no 'findings' key")
+        items = payload["findings"]
         if not isinstance(items, list):
             raise ValueError("'findings' is not a list")
 
@@ -139,8 +164,8 @@ class Specialist(ABC):
                         category=str(item["category"]),
                         summary=str(item["summary"]),
                         file_path=str(item["file_path"]),
-                        line_start=int(item["line_start"]),
-                        line_end=int(item["line_end"]),
+                        line_start=_as_line_number(item["line_start"]),
+                        line_end=_as_line_number(item["line_end"]),
                         suggestion=str(item.get("suggestion", "")),
                         confidence=float(item["confidence"]),
                         rationale=str(item["rationale"]),

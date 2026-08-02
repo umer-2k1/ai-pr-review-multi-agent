@@ -12,6 +12,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
+
 from prreview.diff import parse_diff
 
 FIXTURE = Path(__file__).parent.parent / "fixtures" / "sample.diff"
@@ -127,6 +129,96 @@ def test_hunk_body_extent_comes_from_the_header_counts() -> None:
         fd = diff.by_path(path)
         assert fd is not None
         assert list(fd.added_lines.values()) == [want]
+
+
+SEPARATORS = ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "]
+
+
+@pytest.mark.parametrize("sep", SEPARATORS, ids=lambda s: f"U+{ord(s):04X}")
+def test_unicode_line_separators_in_content_do_not_split_a_line(sep: str) -> None:
+    """Round-3 blocking regression.
+
+    str.splitlines() breaks on these, but in a diff they are *content*: a form-feed
+    page break is a documented convention in GNU C, Emacs Lisp and PEP 8, and
+    U+2028 appears in JS/JSON strings. Splitting one added line into two truncates
+    its recorded content, shifts every later line number, and corrupts the body
+    counters. Worse than the prefix bug it resembles: the shifted line still lands
+    inside the declared hunk, so is_grounded() returns True and INV-3 goes green
+    on a mis-located finding.
+    """
+    text = f"--- a/f.c\n+++ b/f.c\n@@ -1,2 +1,4 @@\n ctx\n+int a;{sep}int b;\n+SECRET = 1\n ctx2\n"
+    fd = parse_diff(text).by_path("f.c")
+    assert fd is not None
+    assert sorted(fd.added_lines) == [2, 3], f"line split by {sep!r}"
+    assert fd.added_lines[2] == f"int a;{sep}int b;", "content was truncated"
+    assert fd.added_lines[3] == "SECRET = 1", "later line shifted"
+
+
+def test_crlf_diff_parses_identically() -> None:
+    text = "--- a/f.py\n+++ b/f.py\n@@ -1,1 +1,2 @@\n ctx\n+added\n"
+    fd = parse_diff(text.replace("\n", "\r\n")).by_path("f.py")
+    assert fd is not None
+    assert fd.added_lines == {2: "added"}
+
+
+def test_over_declared_hunk_header_does_not_ground_unseen_lines() -> None:
+    """Round-3 blocking regression: false ACCEPT.
+
+    Truncated patches are ordinary input — GitHub truncates the per-file `patch`
+    field on large files. The header claimed 220 new-side lines; the body had two.
+    Trusting the header let is_grounded() accept line 219, which the parser never
+    saw, contradicting M1's "verified present in the parsed diff".
+    """
+    diff = parse_diff("--- a/big.py\n+++ b/big.py\n@@ -1,200 +1,220 @@\n ctx\n+x=1\n")
+    fd = diff.by_path("big.py")
+    assert fd is not None
+    assert [(h.start, h.end) for h in fd.hunks] == [(1, 2)]
+    assert diff.is_grounded("big.py", 219, 220) is False
+    assert diff.is_grounded("big.py", 2, 2) is True
+
+
+def test_under_declared_hunk_header_still_grounds_lines_it_read() -> None:
+    """Round-3 blocking regression: false REJECT.
+
+    The parser read line 2 and showed it to the model; rejecting a correct
+    finding on it as 'ungrounded' punishes the model for the parser's arithmetic.
+    """
+    diff = parse_diff("--- a/u.py\n+++ b/u.py\n@@ -1,3 +1,1 @@\n ctx\n+y=2\n ctx2\n")
+    fd = diff.by_path("u.py")
+    assert fd is not None
+    assert fd.added_lines == {2: "y=2"}
+    assert diff.is_grounded("u.py", 2, 2) is True
+
+
+def test_pure_deletion_hunk_grounds_nothing() -> None:
+    diff = parse_diff("--- a/d.py\n+++ b/d.py\n@@ -1,3 +0,0 @@\n-a\n-b\n-c\n")
+    fd = diff.by_path("d.py")
+    assert fd is not None
+    assert fd.hunks == []
+    assert diff.is_grounded("d.py", 1, 1) is False
+
+
+def test_quoted_non_ascii_path_is_decoded() -> None:
+    text = '--- "a/wei\\303\\237.txt"\n+++ "b/wei\\303\\237.txt"\n@@ -1,1 +1,2 @@\n ctx\n+x\n'
+    assert parse_diff(text).paths == ["weiß.txt"]
+
+
+def test_combined_body_cannot_invent_a_phantom_path() -> None:
+    """A combined body line starting '+ ' renders as '+++ …'."""
+    text = "--- a/m.py\n+++ b/m.py\n@@@ -1,3 -1,3 +1,4 @@@\n  ctx\n+ bullet\n++added\n"
+    assert parse_diff(text).paths == []
+
+
+def test_combined_and_normal_file_in_one_diff_keeps_the_normal_one() -> None:
+    text = (
+        "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n@@@ -1,3 -1,3 +1,4 @@@\n  ctx\n++added\n"
+        "diff --git a/ok.py b/ok.py\n--- a/ok.py\n+++ b/ok.py\n@@ -1,1 +1,2 @@\n ctx\n+real=1\n"
+    )
+    diff = parse_diff(text)
+    assert diff.paths == ["ok.py"]
+    fd = diff.by_path("ok.py")
+    assert fd is not None
+    assert fd.added_lines == {2: "real=1"}
 
 
 def test_combined_merge_diff_is_refused_not_misparsed() -> None:
