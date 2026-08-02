@@ -91,10 +91,28 @@ class AgentResult(BaseModel):
     # the model is drifting.
     dropped_ungrounded: int = Field(default=0, ge=0)
 
+    # How many findings failed schema validation and were discarded before
+    # grounding was even considered. Kept SEPARATE from dropped_ungrounded: they
+    # are different failures with different fixes. Ungrounded means the model
+    # invented a location; malformed means it could not produce the agreed shape,
+    # which is the most common real LLM failure mode and the known weakness of a
+    # four-lane fan-out (4x the schema surface).
+    dropped_malformed: int = Field(default=0, ge=0)
+
     @property
     def all_findings_were_hallucinated(self) -> bool:
         """True when the lane produced output, and none of it survived grounding."""
         return self.ok and not self.findings and self.dropped_ungrounded > 0
+
+    @property
+    def produced_nothing_usable(self) -> bool:
+        """True when the lane emitted findings and kept none of them, for any reason.
+
+        The distinction that matters to a reader: "I looked and found nothing" is
+        a review; "I produced N findings and every one was unusable" is a
+        malfunction. Both previously rendered as `findings: 0`.
+        """
+        return self.ok and not self.findings and (self.dropped_ungrounded + self.dropped_malformed) > 0
 
 
 class HitlVerdict(str, Enum):

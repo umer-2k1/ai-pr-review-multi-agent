@@ -126,3 +126,60 @@ class SilentLLM:
 
     def complete(self, system: str, user: str) -> LLMResponse:
         return LLMResponse(text='{"findings": []}', tokens=10)
+
+
+class AllMalformedLLM:
+    """Emits findings that all fail schema validation."""
+
+    def complete(self, system: str, user: str) -> LLMResponse:
+        return LLMResponse(
+            text=json.dumps({
+                "findings": [
+                    {  # severity is not a member of the enum
+                        "severity": "nonsense", "category": "c", "summary": "s",
+                        "file_path": "app/db.py", "line_start": 10, "line_end": 10,
+                        "confidence": 0.5, "rationale": "r",
+                    },
+                    {  # required key missing
+                        "severity": "major", "category": "c", "summary": "s",
+                        "file_path": "app/db.py", "line_start": 10, "line_end": 10,
+                        "confidence": 0.5,
+                    },
+                    {  # confidence out of range
+                        "severity": "major", "category": "c", "summary": "s",
+                        "file_path": "app/db.py", "line_start": 10, "line_end": 10,
+                        "confidence": 7.0, "rationale": "r",
+                    },
+                ]
+            }),
+            tokens=10,
+        )
+
+
+def test_all_malformed_lane_is_distinguishable_from_a_clean_lane() -> None:
+    """BD-2 regression.
+
+    Schema failure is the most common real LLM failure mode, and a four-lane
+    fan-out multiplies the surface. A lane that emitted three findings and kept
+    none of them used to be byte-identical to a lane that genuinely found
+    nothing: ok=True, findings=(), everything zero.
+    """
+    diff = parse_diff(FIXTURE.read_text())
+    malformed = SecuritySpecialist(AllMalformedLLM()).review(diff)
+    clean = SecuritySpecialist(SilentLLM()).review(diff)
+
+    assert malformed.findings == () and clean.findings == ()
+    assert malformed.dropped_malformed == 3
+    assert clean.dropped_malformed == 0
+    assert malformed.produced_nothing_usable is True
+    assert clean.produced_nothing_usable is False
+
+
+def test_malformed_and_ungrounded_are_counted_separately() -> None:
+    """Different failures, different fixes — they must not be conflated."""
+    diff = parse_diff(FIXTURE.read_text())
+    ungrounded = SecuritySpecialist(TotallyHallucinatingLLM()).review(diff)
+    malformed = SecuritySpecialist(AllMalformedLLM()).review(diff)
+
+    assert (ungrounded.dropped_ungrounded, ungrounded.dropped_malformed) == (1, 0)
+    assert (malformed.dropped_ungrounded, malformed.dropped_malformed) == (0, 3)

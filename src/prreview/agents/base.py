@@ -70,7 +70,7 @@ class Specialist(ABC):
                 system=_SYSTEM_PREAMBLE + "\n\nYOUR CONCERN:\n" + self.concern,
                 user=rendered,
             )
-            raw = self._parse(response.text)
+            raw, malformed = self._parse_counted(response.text)
             grounded = tuple(f for f in raw if diff.is_grounded(f.file_path, f.line_start, f.line_end))
             return AgentResult(
                 agent_type=self.agent_type,
@@ -79,6 +79,7 @@ class Specialist(ABC):
                 tokens=response.tokens,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 dropped_ungrounded=len(raw) - len(grounded),
+                dropped_malformed=malformed,
             )
         except Exception as exc:  # noqa: BLE001
             # Deliberately broad. The promise this method makes to the
@@ -105,10 +106,16 @@ class Specialist(ABC):
         return sum(1 for f in raw if not diff.is_grounded(f.file_path, f.line_start, f.line_end))
 
     def _parse(self, text: str) -> list[Finding]:
-        """Extract Findings from the model's JSON envelope.
+        """Extract Findings from the model's JSON envelope."""
+        return self._parse_counted(text)[0]
+
+    def _parse_counted(self, text: str) -> tuple[list[Finding], int]:
+        """Parse, returning (valid findings, count of malformed ones discarded).
 
         Tolerant of a stray markdown fence or leading prose, strict about the
-        shape once found: a malformed finding is dropped, not guessed at.
+        shape once found: a malformed finding is dropped, not guessed at — but it
+        is counted on the way out, because a lane that emitted five findings and
+        kept none of them is a malfunction, not a clean review.
         """
         match = _JSON_RE.search(text)
         if not match:
@@ -119,8 +126,10 @@ class Specialist(ABC):
             raise ValueError("'findings' is not a list")
 
         out: list[Finding] = []
+        malformed = 0
         for item in items:
             if not isinstance(item, dict):
+                malformed += 1
                 continue
             try:
                 out.append(
@@ -138,5 +147,6 @@ class Specialist(ABC):
                     )
                 )
             except (KeyError, ValueError, TypeError, ValidationError):
-                continue  # one malformed finding must not sink the lane
-        return out
+                malformed += 1  # one malformed finding must not sink the lane
+                continue
+        return out, malformed

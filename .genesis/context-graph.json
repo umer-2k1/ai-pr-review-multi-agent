@@ -46,7 +46,8 @@
     "INV-2-every-outbound-call-has-a-timeout": {
       "rule": "Every network call (LLM, GitHub API) is made through llm.py or github.py and passes an explicit timeout. No bare requests/httpx/anthropic call anywhere else in the tree.",
       "why": "Study §0.2 'Tool / API timeout' failure mode + §4.1 Phase 12. A CI job that hangs forever is the prototype's most likely real-world failure, and it is invisible until it happens.",
-      "check": "! grep -rnE '(httpx|requests)\\.(get|post)\\(|anthropic\\.|Anthropic\\(' src/prreview --include='*.py' | grep -vE 'src/prreview/(llm|github)\\.py' ; grep -rn 'timeout' src/prreview/llm.py src/prreview/github.py",
+      "check": "! grep -rnE '(httpx|requests)\\.(get|post)\\(|anthropic\\.[A-Z]|Anthropic\\(' src/prreview --include='*.py' | grep -vE 'src/prreview/(llm|github)\\.py' ; for f in src/prreview/llm.py src/prreview/github.py; do [ -f \"$f\" ] && { grep -q 'timeout' \"$f\" || { echo \"no timeout in $f\"; exit 1; }; }; done; echo 'INV-2 ok'",
+      "check_note": "The github.py half is conditional: that file does not exist until M5, and an invariant whose own command errors on a missing future file reports failure regardless of code state.",
       "violation_means": "An unbounded wait exists. The system can now fail fast-but-hung instead of slower-but-correct."
     },
     "INV-3-no-ungrounded-finding": {

@@ -14,8 +14,12 @@ import re
 from dataclasses import dataclass, field
 
 # @@ -old_start,old_count +new_start,new_count @@
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _NEW_FILE_RE = re.compile(r"^\+\+\+ (?:b/)?(.+?)\s*$")
+# Combined diff (`git show` on a merge): @@@ -1,3 -1,3 +1,4 @@@. Three-way format,
+# not what a two-dot PR diff looks like. Detected so it can be skipped loudly
+# rather than silently misparsed into a file with zero hunks.
+_COMBINED_HUNK_RE = re.compile(r"^@@@+ ")
 
 
 @dataclass(frozen=True)
@@ -86,48 +90,71 @@ def parse_diff(text: str) -> Diff:
     current: FileDiff | None = None
     new_line = 0
 
-    in_hunk = False
+    # Remaining declared body lines for the hunk being consumed. The hunk header
+    # states exactly how many old-side and new-side lines follow, so the body's
+    # extent is *known*, not guessed.
+    #
+    # An earlier version inferred the boundary from line prefixes, which is not
+    # sound: git renders a deleted line whose content starts with "-- " as
+    # "--- <content>", indistinguishable by prefix from a file header. That ended
+    # the hunk early, and a following added line beginning "++ " was then read as
+    # a new file — inventing a phantom path and silently dropping the real file's
+    # line. On a valid patch, in the security lane. Counting is the fix; prefixes
+    # cannot distinguish content from structure in this format.
+    old_left = 0
+    new_left = 0
 
     for raw in text.splitlines():
-        # The header check must not run inside a hunk body: an *added* line whose
-        # content happens to start with "++ " would otherwise be misread as a file
-        # header, inventing a phantom file and silently losing the real one's line.
-        m_file = _NEW_FILE_RE.match(raw)
-        if not in_hunk and raw.startswith("+++ ") and m_file:
-            path = m_file.group(1)
-            if path == "/dev/null":  # deleted file — nothing to review
+        in_hunk = old_left > 0 or new_left > 0
+
+        if not in_hunk:
+            m_file = _NEW_FILE_RE.match(raw)
+            if raw.startswith("+++ ") and m_file:
+                path = m_file.group(1)
+                if path == "/dev/null":  # deleted file — nothing to review
+                    current = None
+                    continue
+                current = FileDiff(path=path)
+                diff.files.append(current)
+                continue
+
+            if _COMBINED_HUNK_RE.match(raw):
+                # Combined/merge diff (`git show` on a merge). There is no single
+                # post-image to cite, so refuse the file outright rather than
+                # misparse it. Dropping it — instead of leaving a hunk-less shell —
+                # keeps `diff.paths` honest about what was actually reviewed.
+                if current is not None and current in diff.files:
+                    diff.files.remove(current)
                 current = None
                 continue
-            current = FileDiff(path=path)
-            diff.files.append(current)
+
+            if raw.startswith("@@"):
+                m_hunk = _HUNK_RE.match(raw)
+                if m_hunk and current is not None:
+                    old_count = int(m_hunk.group(2)) if m_hunk.group(2) is not None else 1
+                    start = int(m_hunk.group(3))
+                    count = int(m_hunk.group(4)) if m_hunk.group(4) is not None else 1
+                    # A zero-length hunk still anchors at `start`.
+                    end = start + max(count, 1) - 1
+                    current.hunks.append(Hunk(start=start, end=end))
+                    new_line = start
+                    old_left, new_left = old_count, count
+                continue
             continue
 
-        if raw.startswith("diff --git") or raw.startswith("--- "):
-            in_hunk = False
-
-        if raw.startswith("@@"):
-            m_hunk = _HUNK_RE.match(raw)
-            if m_hunk and current is not None:
-                start = int(m_hunk.group(1))
-                count = int(m_hunk.group(2)) if m_hunk.group(2) is not None else 1
-                # A zero-length hunk still anchors at `start`.
-                end = start + max(count, 1) - 1
-                current.hunks.append(Hunk(start=start, end=end))
-                new_line = start
-                in_hunk = True
-            continue
-
-        if current is None:
+        # ── inside a hunk body: every line here is content, never structure ──
+        if current is None:  # pragma: no cover - defensive
             continue
 
         if raw.startswith("+"):
             current.added_lines[new_line] = raw[1:]
             new_line += 1
+            new_left -= 1
         elif raw.startswith("-"):
-            pass  # old side only; does not advance new-side numbering
+            old_left -= 1  # old side only; does not advance new-side numbering
         elif raw.startswith("\\"):
             pass  # "\ No newline at end of file" — a note, not a line
-        elif raw.startswith(" ") or raw == "":
+        else:
             # An unmodified context line advances the new-side counter. `git diff`
             # writes a blank context line as a single space, but editors, mail
             # clients and copy-paste routinely strip trailing whitespace, leaving
@@ -135,6 +162,8 @@ def parse_diff(text: str) -> Diff:
             # line number by one — findings then cite locations that are off by
             # the number of blank context lines above them.
             new_line += 1
+            old_left -= 1
+            new_left -= 1
 
     return diff
 

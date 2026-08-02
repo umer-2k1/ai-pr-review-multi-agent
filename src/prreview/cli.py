@@ -48,8 +48,16 @@ def _render_text(result: AgentResult) -> str:
             f"dropped: {result.dropped_ungrounded} ungrounded "
             f"(cited a file/line absent from the diff)"
         )
-    if result.all_findings_were_hallucinated:
-        lines.append("WARNING: every finding this lane produced was ungrounded — this is NOT a clean review.")
+    if result.dropped_malformed:
+        lines.append(
+            f"dropped: {result.dropped_malformed} malformed "
+            f"(did not match the Finding schema)"
+        )
+    if result.produced_nothing_usable:
+        lines.append(
+            "WARNING: this lane produced findings and kept NONE of them — "
+            "a malfunction, not a clean review."
+        )
     lines.append("")
     for f in result.findings:
         lines.append(f"  [{f.severity.value.upper():8}] {f.file_path}:{f.line_start}  ({f.category})")
@@ -81,6 +89,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     diff = parse_diff(diff_text)
     if not diff.files:
+        # Distinguish "not a diff" from "a valid diff with nothing to review".
+        # A delete-only PR is legitimate input; calling it malformed is a lie.
+        looks_like_a_diff = any(
+            line.startswith(("diff --git", "--- ", "+++ ", "@@"))
+            for line in diff_text.splitlines()
+        )
+        if looks_like_a_diff:
+            print(f"note: {diff_path} contains no reviewable post-image lines "
+                  f"(deletions only, or an unsupported combined/merge diff).", file=sys.stderr)
+            return 0
         print(f"error: no files parsed from {diff_path} — is it a unified diff?", file=sys.stderr)
         return 2
 
@@ -96,7 +114,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "tokens": result.tokens,
             "duration_ms": result.duration_ms,
             "dropped_ungrounded": result.dropped_ungrounded,
+            "dropped_malformed": result.dropped_malformed,
             "all_findings_were_hallucinated": result.all_findings_were_hallucinated,
+            "produced_nothing_usable": result.produced_nothing_usable,
             "findings": [_finding_dict(f) for f in result.findings],
         }, indent=2))
     else:

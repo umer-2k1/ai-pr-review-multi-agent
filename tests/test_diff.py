@@ -87,6 +87,58 @@ def test_added_line_that_looks_like_a_file_header_is_not_one() -> None:
     assert any("y = 2" in c for c in fd.added_lines.values()), "real content was lost"
 
 
+def test_deleted_line_starting_with_dash_dash_does_not_end_the_hunk() -> None:
+    """BD-1 regression — a regression introduced by the fix for N4.
+
+    git renders a deleted line whose content starts with "-- " (SQL comment,
+    email signature) as "--- <content>", which a prefix heuristic cannot tell
+    from a file header. Ending the hunk there let the next added line beginning
+    "++ " be read as a new file: a phantom path was invented and the real file's
+    line — a hardcoded credential, in the security lane — was silently lost.
+    This diff is a valid patch; `git apply --check` accepts it.
+    """
+    text = (
+        "--- a/mig.sql\n+++ b/mig.sql\n"
+        "@@ -1,4 +1,5 @@\n"
+        "--- seed the users table\n"
+        " SELECT 1;\n"
+        " keep_me = 1\n"
+        "+++ b/phantom.py\n"
+        '+password = "leaked"\n'
+        " BASE = 2\n"
+    )
+    diff = parse_diff(text)
+    assert diff.paths == ["mig.sql"], f"phantom file invented: {diff.paths}"
+    fd = diff.by_path("mig.sql")
+    assert fd is not None
+    added = sorted(fd.added_lines.items())
+    assert added == [(3, "++ b/phantom.py"), (4, 'password = "leaked"')], added
+
+
+def test_hunk_body_extent_comes_from_the_header_counts() -> None:
+    """Content after a hunk's declared length is structure again, not body."""
+    text = (
+        "--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,2 @@\n x\n+y\n"
+        "--- a/b.py\n+++ b/b.py\n@@ -1,1 +1,2 @@\n p\n+q\n"
+    )
+    diff = parse_diff(text)
+    assert diff.paths == ["a.py", "b.py"]
+    for path, want in (("a.py", "y"), ("b.py", "q")):
+        fd = diff.by_path(path)
+        assert fd is not None
+        assert list(fd.added_lines.values()) == [want]
+
+
+def test_combined_merge_diff_is_refused_not_misparsed() -> None:
+    """A three-way combined diff has no two-dot post-image; refuse it.
+
+    Refusing means the file gets no hunks, so nothing can be grounded against it
+    and no finding is manufactured from a misread body.
+    """
+    text = "--- a/m.py\n+++ b/m.py\n@@@ -1,3 -1,3 +1,4 @@@\n  ctx\n++added\n"
+    assert parse_diff(text).files == []
+
+
 def test_deleted_file_is_skipped() -> None:
     text = "--- a/gone.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-x = 1\n"
     assert parse_diff(text).files == []
