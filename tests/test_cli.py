@@ -104,6 +104,26 @@ def test_demo_command_from_plan_md(capsys: pytest.CaptureFixture[str]) -> None:
     assert ("app/db.py", 14, "hardcoded-secret") in located
 
 
+def test_incomplete_review_exits_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A partially-failed fan-out must not read as a pass in CI.
+
+    Previously untested: replacing `return 1 if review.incomplete else 0` with
+    `return 0` left the whole suite green.
+    """
+    from prreview.contracts import AgentType
+    from prreview.llm import FailingLLM, OfflineLLM
+
+    def factory(offline: bool):  # type: ignore[no-untyped-def]
+        return lambda at: FailingLLM() if at is AgentType.QUALITY else OfflineLLM(at.value)
+
+    monkeypatch.setattr("prreview.cli._client_factory", factory)
+    assert main(["run", "--diff", "fixtures/sample.diff", "--offline"]) == 1
+
+
+def test_complete_review_exits_0() -> None:
+    assert main(["run", "--diff", "fixtures/sample.diff", "--offline"]) == 0
+
+
 def test_missing_file_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["run", "--diff", str(tmp_path / "nope.diff"), "--offline"]) == 2
 

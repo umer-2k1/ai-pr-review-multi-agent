@@ -19,45 +19,59 @@ from prreview.contracts import (
     AgentType,
     Finding,
     Review,
+    Severity,
 )
 
 
-def _worst(*severities: object) -> object:
-    return max(severities, key=lambda s: SEVERITY_RANK[s])  # type: ignore[index]
+def _worst(*severities: Severity) -> Severity:
+    return max(severities, key=lambda s: SEVERITY_RANK[s])
 
 
 def dedupe(findings: list[Finding]) -> list[Finding]:
-    """Collapse findings that several specialists raised at the same location.
+    """Collapse findings that several specialists reached the same conclusion about.
 
-    Keeps the highest-confidence one and records how many lanes agreed.
+    Keeps the highest-confidence one and records how many **distinct lanes**
+    agreed.
 
     Agreement is signal, not noise: two independent specialists landing on the
-    same line is the strongest evidence this pipeline can produce, so it has to
-    survive the merge rather than be discarded as a duplicate.
+    same conclusion is the strongest evidence this pipeline can produce, so it
+    has to survive the merge rather than be discarded as a duplicate. That makes
+    it a field worth getting exactly right — and an earlier version got it
+    wrong twice over. It counted *findings* rather than lanes, so a single lane
+    reporting two separate issues on one line produced one finding claiming "2
+    lanes agree", and the second issue was lost outright. On a project whose
+    named primary failure mode is rubber-stamping an almost-right review, an
+    inflated corroboration badge is the worst possible field to inflate.
+
+    So: the key includes `category` (two different conclusions about one line are
+    two findings, not one), and `agreement` counts distinct `agent_type` values.
+    A lane cannot corroborate itself.
 
     Severity is taken as the **worst** across the agreeing lanes, not the
     winner's. If security says CRITICAL and quality says MINOR about the same
-    line, the review must surface CRITICAL — deduplication must never be able to
+    thing, the review must surface CRITICAL — deduplication must never be able to
     downgrade a risk, because the whole point of the security lane is that its
     misses are the expensive ones.
     """
-    best: dict[tuple[str, int], Finding] = {}
-    order: list[tuple[str, int]] = []
+    best: dict[tuple[str, int, str], Finding] = {}
+    lanes: dict[tuple[str, int, str], set[AgentType]] = {}
+    order: list[tuple[str, int, str]] = []
 
     for f in findings:
-        key = f.location_key()
+        key = f.merge_key()
         current = best.get(key)
         if current is None:
             best[key] = f
+            lanes[key] = {f.agent_type}
             order.append(key)
             continue
+        lanes[key].add(f.agent_type)
         winner = f if f.confidence > current.confidence else current
         best[key] = winner.model_copy(update={
-            "agreement": current.agreement + 1,
             "severity": _worst(winner.severity, current.severity, f.severity),
         })
 
-    return [best[k] for k in order]
+    return [best[k].model_copy(update={"agreement": len(lanes[k])}) for k in order]
 
 
 def sort_findings(findings: list[Finding]) -> list[Finding]:

@@ -26,7 +26,7 @@ class TestDedupe:
         out = dedupe([_f(line=10), _f(line=20), _f(path="b.py", line=10)])
         assert len(out) == 3
 
-    def test_same_location_collapses_and_counts_agreement(self) -> None:
+    def test_same_conclusion_from_two_lanes_collapses_and_counts_agreement(self) -> None:
         out = dedupe([
             _f(agent=AgentType.SECURITY, confidence=0.9),
             _f(agent=AgentType.QUALITY, confidence=0.4),
@@ -40,6 +40,51 @@ class TestDedupe:
             _f(agent=AgentType.SECURITY), _f(agent=AgentType.QUALITY), _f(agent=AgentType.TESTS)
         ])
         assert out[0].agreement == 3
+
+    def test_one_lane_reporting_two_issues_on_one_line_keeps_both(self) -> None:
+        """B1 regression, the loss half.
+
+        Keying on location alone collapsed two *different* issues that happened
+        to share a line — routine real-model behaviour — and the loser's
+        category, summary and rationale were unrecoverable.
+        """
+        out = dedupe([
+            _f(category="sql-injection", severity=Severity.CRITICAL, confidence=0.92),
+            _f(category="missing-input-validation", severity=Severity.MAJOR, confidence=0.70),
+        ])
+        assert len(out) == 2, "a lane's second issue on the same line was dropped"
+        assert {f.category for f in out} == {"sql-injection", "missing-input-validation"}
+
+    def test_a_lane_cannot_corroborate_itself(self) -> None:
+        """B1 regression, the fabrication half.
+
+        `agreement` counted findings rather than distinct lanes, so a single
+        specialist produced a finding claiming two lanes agreed. On a project
+        whose named failure mode is rubber-stamping an almost-right review, an
+        inflated corroboration badge is the worst field to inflate.
+        """
+        out = dedupe([
+            _f(agent=AgentType.SECURITY, category="sql-injection", confidence=0.9),
+            _f(agent=AgentType.SECURITY, category="sql-injection", confidence=0.5),
+        ])
+        assert len(out) == 1
+        assert out[0].agreement == 1, "one lane reported twice; that is not agreement"
+
+    def test_agreement_counts_distinct_lanes_not_findings(self) -> None:
+        out = dedupe([
+            _f(agent=AgentType.SECURITY, confidence=0.9),
+            _f(agent=AgentType.SECURITY, confidence=0.8),
+            _f(agent=AgentType.QUALITY, confidence=0.7),
+        ])
+        assert len(out) == 1
+        assert out[0].agreement == 2, "3 findings, but only 2 distinct lanes"
+
+    def test_different_conclusions_from_different_lanes_both_survive(self) -> None:
+        out = dedupe([
+            _f(agent=AgentType.SECURITY, category="sql-injection"),
+            _f(agent=AgentType.QUALITY, category="resource-leak"),
+        ])
+        assert len(out) == 2, "two different conclusions are two findings"
 
     def test_dedup_cannot_downgrade_severity(self) -> None:
         """The judgment call that matters.

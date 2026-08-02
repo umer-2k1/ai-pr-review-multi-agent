@@ -64,7 +64,16 @@ def run_review(
     with no I/O at all.
     """
     rid = review_id or uuid.uuid4().hex[:12]
-    specialists = build_specialists(client_factory)
+    try:
+        specialists = build_specialists(client_factory)
+    except Exception as exc:  # noqa: BLE001
+        # A client factory that raises must become four failed lanes, not a
+        # traceback: the caller is promised a Review, and "could not construct
+        # the clients" is exactly the kind of failure the review should report.
+        return aggregate(rid, [
+            AgentResult(agent_type=at, ok=False, error=f"{type(exc).__name__}: {exc}")
+            for at in SPECIALISTS
+        ])
 
     if on_event:
         on_event("review_started", None, None)
@@ -120,11 +129,12 @@ def run_review(
         if on_event:
             on_event("agent_completed", specialist.agent_type, outcome)
 
-    # Deterministic lane order regardless of completion order — otherwise the
-    # same diff yields a differently-ordered review on every run, which makes
-    # output diffing and golden tests useless.
-    order = list(SPECIALISTS)
-    results.sort(key=lambda r: order.index(r.agent_type))
+    # `results` is built by iterating `specialists`, which comes from SPECIALISTS,
+    # so lane order is already deterministic regardless of completion order —
+    # otherwise the same diff would yield a differently-ordered review on every
+    # run, making output diffing and golden tests useless. No sort needed; the
+    # ordering is a property of how results are collected, and the test that
+    # pins it is `test_lane_order_is_deterministic_regardless_of_completion_order`.
 
     review = aggregate(rid, results)
     if on_event:

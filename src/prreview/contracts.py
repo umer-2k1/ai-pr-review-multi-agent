@@ -63,8 +63,20 @@ class Finding(BaseModel):
     agreement: int = Field(default=1, ge=1)
 
     def location_key(self) -> tuple[str, int]:
-        """Dedup key: same file + same starting line is the same location."""
+        """Where this finding points. Not the dedup key — see `merge_key`."""
         return (self.file_path, self.line_start)
+
+    def merge_key(self) -> tuple[str, int, str]:
+        """Dedup key: same file, same line, AND same category.
+
+        Category is part of the key deliberately. Keying on location alone
+        collapsed *different issues* that happen to share a line — one lane
+        reporting both an injection and a missing validation check on the same
+        call would lose one of them outright, and the survivor would carry a
+        fabricated agreement count. Two lanes reaching the same conclusion about
+        the same line share a category; two different conclusions do not.
+        """
+        return (self.file_path, self.line_start, self.category)
 
 
 class AgentResult(BaseModel):

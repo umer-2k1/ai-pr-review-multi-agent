@@ -103,10 +103,45 @@ def test_a_hung_lane_is_reported_not_waited_on() -> None:
 
 
 def test_duplicate_finding_appears_once_with_agreement() -> None:
-    """The fixture plants a line that both security and quality flag."""
+    """M2's success criterion 2, end to end.
+
+    `fixtures/duplicate.diff` plants a `# TODO` line, which the tests and docs
+    lanes both flag as `unresolved-marker`. It must appear ONCE with
+    agreement == 2.
+
+    An earlier version of this test asserted only that locations were unique —
+    which passed even with `dedupe` replaced by the identity function, because
+    the fixture contained no collision at all. It proved nothing.
+    """
     review = run_review(_diff(DUPLICATE), _offline)
-    keys = [f.location_key() for f in review.findings]
-    assert len(keys) == len(set(keys)), f"duplicate locations survived: {keys}"
+
+    markers = [f for f in review.findings if f.category == "unresolved-marker"]
+    assert len(markers) == 1, f"the TODO should merge to one finding, got {len(markers)}"
+    assert markers[0].agreement == 2, (
+        f"tests and docs both flag it; agreement should be 2, got {markers[0].agreement}"
+    )
+
+    keys = [f.merge_key() for f in review.findings]
+    assert len(keys) == len(set(keys)), f"duplicate keys survived: {keys}"
+
+
+def test_a_single_lane_never_reports_agreement_above_one() -> None:
+    """B1 regression, end to end: only the security lane speaks."""
+
+    def only_security(at: AgentType) -> LLMClient:
+        return OfflineLLM("security") if at is AgentType.SECURITY else SilentLLM()
+
+    review = run_review(_diff(), only_security)
+    assert review.findings, "the security lane should still find something"
+    for f in review.findings:
+        assert f.agreement == 1, (
+            f"{f.category} claims {f.agreement} lanes agree, but only security ran"
+        )
+
+
+class SilentLLM:
+    def complete(self, system: str, user: str) -> LLMResponse:
+        return LLMResponse(text='{"findings": []}', tokens=1)
 
 
 def test_on_event_seam_fires_for_every_stage() -> None:
