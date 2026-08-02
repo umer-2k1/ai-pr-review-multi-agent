@@ -8,6 +8,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
@@ -18,9 +20,18 @@ from prreview.agents.security import SecuritySpecialist
 from prreview.agents.tests import TestsSpecialist
 from prreview.contracts import AgentResult, AgentType, Finding, HitlVerdict, Review
 from prreview.diff import parse_diff
+from prreview.events import (
+    DEFAULT_EVENTS_DIR,
+    EventLog,
+    format_trace,
+    latest_review_id,
+    read_log,
+)
 from prreview.hitl import render_draft
 from prreview.llm import AnthropicLLM, LLMClient, OfflineLLM
 from prreview.orchestrator import run_review
+
+DEFAULT_EVENTS_PATH = DEFAULT_EVENTS_DIR / "events.jsonl"
 
 # Typed as factories rather than `type[Specialist]`: the base is abstract, so a
 # mapping of the class objects reads to mypy as "may instantiate the ABC".
@@ -213,7 +224,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # A specialist that failed is a failed run, even though it did not crash.
         return 0 if result.ok else 1
 
-    review = run_review(diff, _client_factory(args.offline))
+    log = EventLog(path=None if args.no_events else Path(args.events))
+
+    def sink(event_type: str, agent_type: AgentType | None, result: AgentResult | None) -> None:
+        log.emit(review_id_holder[0], event_type, agent_type, result)
+
+    # The id must be known before the first event, so the whole trace shares one.
+    review_id_holder = [uuid.uuid4().hex[:12]]
+    review = run_review(diff, _client_factory(args.offline),
+                        review_id=review_id_holder[0], on_event=sink)
+    log.emit(review.review_id, "gate_decided", None, None,
+             verdict=review.hitl_verdict.value,
+             confidence=review.overall_confidence,
+             findings=len(review.findings))
+
     if args.draft:
         # The markdown a human reads before deciding to post it. Produced for
         # HOLD as well as DRAFT_READY — the point of the gate is that a person
@@ -231,6 +255,29 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 1 if review.incomplete else 0
 
 
+def _cmd_trace(args: argparse.Namespace) -> int:
+    path = Path(args.events)
+    events = read_log(path)
+    if not events:
+        print(f"no events recorded in {path}", file=sys.stderr)
+        return 2
+
+    review_id = args.review_id
+    if args.last or review_id is None:
+        review_id = latest_review_id(path)
+
+    selected = [e for e in events if e.review_id == review_id]
+    if not selected:
+        print(f"no events for review {review_id} in {path}", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps([asdict(e) for e in selected], indent=2))
+    else:
+        print(format_trace(selected))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pr-review", description="Multi-agent PR reviewer.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -243,7 +290,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     run.add_argument("--draft", action="store_true",
                      help="Emit the markdown draft review for a human to approve.")
+    run.add_argument("--events", default=str(DEFAULT_EVENTS_PATH),
+                     help=f"Events spine file (default: {DEFAULT_EVENTS_PATH}).")
+    run.add_argument("--no-events", action="store_true",
+                     help="Do not write the events spine.")
     run.set_defaults(func=_cmd_run)
+
+    trace = sub.add_parser("trace", help="Reconstruct a review from the events spine.")
+    trace.add_argument("--events", default=str(DEFAULT_EVENTS_PATH),
+                       help=f"Events spine file (default: {DEFAULT_EVENTS_PATH}).")
+    trace.add_argument("--last", action="store_true", help="Trace the most recent review.")
+    trace.add_argument("--review-id", default=None, help="Trace a specific review id.")
+    trace.add_argument("--json", action="store_true", help="Emit the raw rows as JSON.")
+    trace.set_defaults(func=_cmd_trace)
 
     return parser
 
