@@ -1,14 +1,19 @@
 # CURRENT
 - active_loop: NONE
-- target: M2 — Four specialists in parallel + aggregator
+- target: M3 — overall_confidence + the HITL gate
 - iteration: 0
-- last_gate: M1 L4 VERIFY **APPROVE** (round 6, separate opus-5 session)
-- last_action: M1 complete and approved; explain-diff written
-- next_action: G0 existence pre-flight on M2, then L1 BUILD
+- last_gate: M2 L4 VERIFY **APPROVE** (round 2, separate opus-5 session)
+- last_action: M2 complete and approved; explain-diff written
+- next_action: G0 existence pre-flight on M3, then L1 BUILD
 - model: claude-sonnet-5
 - tokens_used: 0
 - tokens_budget: 50000
 - skills_loaded: []
+
+## M2 — DONE (verified)
+Approved round 2 after 1 rejection / 2 blocking defects (B1 fabricated agreement +
+lost a finding; B2 the criterion fixture contained no duplicate). Gates: pytest 124
+passed, mypy strict clean, demo prints 5 then 4, INV-1/2/3/4 exit 0.
 
 ## M1 — DONE (verified)
 Approved round 6 after 5 rejections / 10 blocking defects. Gates at approval:
@@ -24,10 +29,15 @@ Approved round 6 after 5 rejections / 10 blocking defects. Gates at approval:
 **NOT yet reflected in DONE.html / PLAN.md** — those two files need the user's
 explicit go-ahead to edit (standing rule). M1's row still reads `todo` there.
 Pending edits when approved:
-- DONE.html §3: M1 status todo -> done
-- PLAN.md Progress: append the M1 completion row
+- DONE.html §3: M1 and M2 status todo -> done
+- PLAN.md Progress: append the M1 and M2 completion rows
 - PLAN.md M1 demo command: add `--json` (its success criterion says "as JSON" but
   the command string omits the flag; `--json` works and is asserted in tests)
+- PLAN.md M2 demo command: the jq is malformed. `.findings | length, (.agents_run |
+  length)` parses as `.findings | (length, ...)`, so jq exits 5. Should be
+  `jq '(.findings|length), (.agents_run|length)'` — the CLI output is correct.
+- PLAN.md M2 text says dedup is by (file_path, line_start); the key is now the
+  triple (file_path, line_start, category) after L4 B1. Needs a decision record.
 
 ## Notes for a cold session
 - Scope is a PROTOTYPE SUBSET of the study PDF. See PLAN.md header +

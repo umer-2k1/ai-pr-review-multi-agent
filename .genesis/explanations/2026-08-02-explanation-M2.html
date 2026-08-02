@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>M2 explained — ai-pr-review-multi-agent</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --ink:#e6edf3; --mut:#8b949e;
+          --ok:#2ea043; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.6 ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:900px; margin:0 auto; padding:32px 24px 80px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  h2 { font-size:18px; margin:34px 0 12px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+  h3 { font-size:15px; margin:22px 0 8px; color:var(--accent); }
+  .sub { color:var(--mut); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:12px 0; }
+  .bad { border-left:3px solid var(--bad); }
+  .ok { border-left:3px solid var(--ok); }
+  code { background:#1f2630; padding:1px 6px; border-radius:5px; font-size:13px; }
+  pre { background:#1f2630; padding:12px 14px; border-radius:8px; overflow-x:auto; font-size:13px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; margin:8px 0; }
+  th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--mut); font-weight:600; }
+  .q { background:#1a2230; border:1px solid var(--accent); border-radius:8px; padding:14px 16px; margin:10px 0; }
+  .note { color:var(--mut); font-size:13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>M2 explained — four specialists in parallel + aggregator</h1>
+<p class="sub">Generated after L4 VERIFY APPROVE · 2026-08-02 · 2 rounds, 2 blocking defects,
+   93 → 121 tests.</p>
+
+<h2>What M2 built</h2>
+<div class="card">
+<pre>parse_diff()
+     ↓
+orchestrator.run_review()          ← 4 daemon threads, one bounded deadline
+     ├── security  ┐
+     ├── quality   │  each returns Finding[] independently
+     ├── tests     │
+     └── docs      ┘
+     ↓
+aggregator.aggregate()             ← merge, dedup, agreement, incomplete
+     ↓
+cli._render_review()               ← exit 1 if incomplete</pre>
+<p>The fan-out is now the default; <code>--agent</code> runs one lane for debugging.</p>
+</div>
+
+<h2>Two decisions worth understanding</h2>
+
+<h3>1. Dedup can never downgrade a risk</h3>
+<div class="card ok">
+<p>When lanes agree on a location, the highest-confidence finding wins the merge — but the
+   <b>severity is the worst across all of them</b>. If security says CRITICAL at 0.4 confidence and
+   quality says MINOR at 0.95, the merged finding is CRITICAL.</p>
+<p>The alternative — take the winner's severity — would let deduplication hide a risk, which inverts
+   the point of having a security lane at all. Tested for order-independence across all 24 permutations
+   of a four-finding collision.</p>
+</div>
+
+<h3>2. The orchestrator does not use ThreadPoolExecutor</h3>
+<div class="card ok">
+<p>It was written with one. A test for the study's <em>orchestration-deadlock</em> failure mode caught it:</p>
+<pre>AssertionError: orchestrator blocked for 30.0s on a hung lane
+assert 30.004 &lt; 5</pre>
+<p>Three separate reasons the executor cannot provide the needed property:</p>
+<ul>
+  <li><code>__exit__</code> calls <code>shutdown(wait=True)</code> — it blocks regardless of what
+      <code>wait(timeout=…)</code> returned, so the deadline is decorative.</li>
+  <li><code>future.cancel()</code> cannot stop an already-running lane.</li>
+  <li>Since 3.9 its threads are non-daemon and joined at interpreter exit — so a hung lane would also
+      hang the process on the way out, which is fatal in a CI job.</li>
+</ul>
+<p>Raw daemon threads give exactly what was required: the review returns on the deadline, and a stuck
+   lane cannot keep the job alive. Verified by the verifier in a subprocess — four lanes sleeping an
+   hour, <code>timeout_s=1.0</code>, <b>total process wall time 1.21s</b>.</p>
+</div>
+
+<h2>What went wrong</h2>
+
+<h3>B1 — a lane corroborating itself</h3>
+<div class="card bad">
+<p><code>agreement</code> incremented once per colliding <em>finding</em>, and the merge key was location
+   alone. One specialist reporting two issues on one line produced:</p>
+<pre>[CRITICAL] app/db.py:10  (sql-injection, security)  [2 lanes agree]</pre>
+<p>…from the security lane <b>by itself</b>. Two failures at once:</p>
+<ul>
+  <li><b>Fabrication.</b> A corroboration badge claiming independent confirmation that never happened.
+      On a project whose named primary failure mode is rubber-stamping an almost-right review, this is
+      the single worst field to inflate.</li>
+  <li><b>Loss.</b> <code>missing-input-validation</code> was deleted outright — category, summary and
+      rationale unrecoverable.</li>
+</ul>
+<p>Unreachable through <code>--offline</code>, because the stub <code>break</code>s after one pattern
+   match per line. That is <em>why</em> no test caught it — and it sits squarely on the shipped
+   Anthropic path.</p>
+<p><b>Fix:</b> merge key is <code>(file_path, line_start, category)</code>; <code>agreement</code> counts
+   distinct <code>agent_type</code> values. Two different conclusions about one line are two findings.</p>
+</div>
+
+<h3>B2 — a fixture that proved nothing</h3>
+<div class="card bad">
+<p>The fixture added <em>specifically</em> to demonstrate "duplicate appears once with agreement 2"
+   contained no duplicate: two findings, different lines, both <code>agreement: 1</code>. The test
+   asserted only that locations were unique — which passes with <code>dedupe</code> replaced by the
+   identity function — and its docstring claimed a collision that did not exist.</p>
+<p>It looked like proof and was not.</p>
+</div>
+
+<h2>The pattern across M1 and M2</h2>
+<div class="card">
+<p><b>The tests written alongside the code are the least trustworthy artifact produced.</b> Across two
+   milestones, four separate tests asserted something other than what their docstring claimed, and each
+   was found only by mutation — deliberately reintroducing the bug and checking whether anything failed.</p>
+<table>
+  <tr><th>Test</th><th>Claimed</th><th>Actually pinned</th></tr>
+  <tr><td>M1 <code>test_added_lines…</code></td><td>line numbers correct</td><td>a substring appears somewhere</td></tr>
+  <tr><td>M1 separator tests ×12</td><td>the escape works</td><td><code>llm.py</code>'s <code>split("\n")</code></td></tr>
+  <tr><td>M2 <code>test_duplicate…</code></td><td>dedup + agreement</td><td>nothing (fixture had no collision)</td></tr>
+  <tr><td>M2 <code>test_a_single_lane…</code></td><td>B1 end-to-end</td><td>nothing (findings never collided)</td></tr>
+</table>
+<p class="note">A green suite is evidence that the tests pass, not that the code works. Mutation testing
+   is what turns the first into the second.</p>
+</div>
+
+<h2>Quiz — answer these three</h2>
+
+<div class="q"><p><b>1.</b> Why does the merge key include <code>category</code>? Give the concrete failure
+   that keying on <code>(file_path, line_start)</code> alone produced, and say which of the two harms —
+   fabrication or loss — you think is worse here, and why.</p></div>
+
+<div class="q"><p><b>2.</b> <code>ThreadPoolExecutor</code> was replaced by raw daemon threads. Name the
+   three independent reasons the executor could not provide a working deadline. Which of them would
+   still bite even if the timeout worked correctly?</p></div>
+
+<div class="q"><p><b>3.</b> Four separate tests so far have passed while the bug they were written for was
+   present. What is the cheapest routine you could add to catch that class of failure before a verifier
+   does — and why does a green test suite not already give you that?</p></div>
+
+</div>
+</body>
+</html>

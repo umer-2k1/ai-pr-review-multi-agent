@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -36,7 +37,7 @@ def test_lane_order_is_deterministic_regardless_of_completion_order() -> None:
     first = run_review(_diff(), _offline, review_id="fixed")
     second = run_review(_diff(), _offline, review_id="fixed")
     assert first.agents_run == second.agents_run
-    assert [f.location_key() for f in first.findings] == [f.location_key() for f in second.findings]
+    assert [f.merge_key() for f in first.findings] == [f.merge_key() for f in second.findings]
 
 
 def test_lanes_actually_run_in_parallel() -> None:
@@ -97,7 +98,9 @@ def test_a_hung_lane_is_reported_not_waited_on() -> None:
     review = run_review(_diff(), factory, timeout_s=0.5)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 5, f"orchestrator blocked for {elapsed:.1f}s on a hung lane"
+    # Scaled to the deadline, not a loose absolute: a bound of 5s against a
+    # 0.5s timeout tolerates a 10x regression silently.
+    assert elapsed < 0.5 * 4, f"orchestrator blocked for {elapsed:.2f}s against a 0.5s deadline"
     assert AgentType.DOCS in review.agents_failed
     assert review.incomplete is True
 
@@ -125,23 +128,70 @@ def test_duplicate_finding_appears_once_with_agreement() -> None:
     assert len(keys) == len(set(keys)), f"duplicate keys survived: {keys}"
 
 
+class SilentLLM:
+    def complete(self, system: str, user: str) -> LLMResponse:
+        return LLMResponse(text='{"findings": []}', tokens=1)
+
+
+class TwoIssuesOnOneLineLLM:
+    """One lane, two different conclusions about the SAME line.
+
+    `OfflineLLM` cannot produce this — it `break`s after the first pattern match
+    per line — which is precisely why the offline path never exposed B1.
+    """
+
+    def complete(self, system: str, user: str) -> LLMResponse:
+        return LLMResponse(text=json.dumps({"findings": [
+            {"severity": "critical", "category": "sql-injection", "summary": "injection",
+             "file_path": "app/db.py", "line_start": 10, "line_end": 10,
+             "suggestion": "", "confidence": 0.92, "rationale": "interpolated SQL"},
+            {"severity": "major", "category": "missing-input-validation", "summary": "no validation",
+             "file_path": "app/db.py", "line_start": 10, "line_end": 10,
+             "suggestion": "", "confidence": 0.70, "rationale": "username is unchecked"},
+        ]}), tokens=1)
+
+
 def test_a_single_lane_never_reports_agreement_above_one() -> None:
-    """B1 regression, end to end: only the security lane speaks."""
+    """B1 regression, end to end.
+
+    An earlier version of this test used OfflineLLM, whose two findings land on
+    *different* lines — so nothing ever collided and the test passed with the
+    full original B1 bug restored. It asserted nothing. This stub forces a real
+    same-line, same-lane collision, which is the only shape that reproduces B1.
+    """
 
     def only_security(at: AgentType) -> LLMClient:
-        return OfflineLLM("security") if at is AgentType.SECURITY else SilentLLM()
+        return TwoIssuesOnOneLineLLM() if at is AgentType.SECURITY else SilentLLM()
 
     review = run_review(_diff(), only_security)
-    assert review.findings, "the security lane should still find something"
+
+    assert len(review.findings) == 2, (
+        f"one lane's two issues on one line collapsed to {len(review.findings)}"
+    )
+    assert {f.category for f in review.findings} == {"sql-injection", "missing-input-validation"}
     for f in review.findings:
         assert f.agreement == 1, (
             f"{f.category} claims {f.agreement} lanes agree, but only security ran"
         )
 
 
-class SilentLLM:
-    def complete(self, system: str, user: str) -> LLMResponse:
-        return LLMResponse(text='{"findings": []}', tokens=1)
+class ExplodingFactoryError(RuntimeError):
+    pass
+
+
+def test_a_raising_client_factory_becomes_four_failed_lanes() -> None:
+    """A factory that blows up must not escape as a traceback: the caller is
+    promised a Review, and 'could not build the clients' is a reportable failure."""
+
+    def boom(at: AgentType) -> LLMClient:
+        raise ExplodingFactoryError("no credentials")
+
+    review = run_review(_diff(), boom)
+
+    assert len(review.agents_run) == 4
+    assert len(review.agents_failed) == 4
+    assert review.incomplete is True
+    assert review.findings == ()
 
 
 def test_on_event_seam_fires_for_every_stage() -> None:

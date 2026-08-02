@@ -43,6 +43,23 @@ SEVERITY_RANK: dict[Severity, int] = {
 }
 
 
+def normalise_category(category: str) -> str:
+    """Fold a category slug for comparison.
+
+    A real model will not emit a fixed vocabulary: `SQL-Injection`,
+    `sql_injection` and ` sql-injection ` are the same conclusion. Without
+    folding, two lanes that genuinely agree merge only on a byte-exact match, so
+    the review shows near-duplicate noise and loses the corroboration signal that
+    is the strongest evidence this pipeline produces.
+
+    Folding cannot cause a wrong merge in the direction that matters: it only
+    ever unifies slugs that differ by case, separator or whitespace. Genuinely
+    different conclusions (`sqli` vs `sql-injection`) still under-merge, which is
+    the safe failure — noise, not a fabricated claim.
+    """
+    return category.strip().casefold().replace("_", "-")
+
+
 class Finding(BaseModel):
     """One structured observation about one location in the diff."""
 
@@ -76,7 +93,7 @@ class Finding(BaseModel):
         fabricated agreement count. Two lanes reaching the same conclusion about
         the same line share a category; two different conclusions do not.
         """
-        return (self.file_path, self.line_start, self.category)
+        return (self.file_path, self.line_start, normalise_category(self.category))
 
 
 class AgentResult(BaseModel):
