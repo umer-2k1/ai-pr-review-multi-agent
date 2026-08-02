@@ -85,7 +85,7 @@ iteration. Failing the same gate three iterations in a row halts the loop and su
 | **G1 Skill** | Did we load `agentic-swe-master` + router + the loop's required skill? Did we log `skills considered: […]; chose: X`? | Log line in checkpoint | Halt iter, force load, retry |
 | **G2 Progress** | Did this iter measurably move the milestone forward? (file diff, test added, error count down, knowledge filed) | ≥1 quantified delta | Strike. 3 strikes → halt loop |
 | **G3 Cost** | Tokens + tool calls under per-loop budget? | Under cap | Halt loop, surface |
-| **G4 Quality** | `{{TYPECHECK_CMD}}` clean AND `{{TEST_CMD}}` green AND lint clean for files touched? | All checks pass | Spawn L2 DEBUG, retry |
+| **G4 Quality** | `mypy src/` clean AND `pytest -q` green AND lint clean for files touched? | All checks pass | Spawn L2 DEBUG, retry |
 | **G5 Verify** | Independent checker (different model OR fresh context) approves the artifact against the milestone spec? | APPROVE verdict + reasoning | Spawn L2 DEBUG with feedback, retry once |
 
 Gates are **computed, not narrated** — run the command, paste the exit code. No checkpoint block = the iteration didn't happen.
@@ -355,7 +355,8 @@ pass: read every wiki page, flag stale entries, surface gaps. Write findings to 
 - Edit `DONE.html` or `PLAN.md` without explicit user request.
 - Invent gate results — gates are computed (run the command, paste the exit code), not narrated.
 - Continue past iteration cap or budget without surfacing.
-- Touch files outside the per-milestone freeze boundary ({{FREEZE_BOUNDARY}}).
+- Touch files outside the per-milestone freeze boundary (`src/**`, `tests/**`, plus the exact
+  file list named in that milestone's PLAN.md entry).
 
 ---
 
@@ -363,7 +364,11 @@ pass: read every wiki page, flag stale entries, surface gaps. Write findings to 
 
 - Loops that self-modify these gate definitions.
 - Auto-fix in L5 HEALTH.
-- {{OUT_OF_SCOPE}}
+- Building any deferred subsystem without a new user decision: FastAPI/webhook ingress, Redis/ARQ
+  queue, pgvectorscale RAG, Tiger Cloud, continuous aggregates, Next.js dashboard. If a milestone
+  seems to need one, stop and surface it — that is scope growth, not an implementation detail.
+- Granting the GitHub token write scope, or adding any code path that posts to a PR without
+  human approval (INV-4).
 
 ---
 

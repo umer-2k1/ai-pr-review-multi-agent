@@ -40,11 +40,36 @@
   <!-- ───────────── THE LOCKED SPEC ───────────── -->
   <h2>1 · The Locked Spec (what we are building)</h2>
   <div class="card locked">
-    <p><b>Cognitive job:</b> {{COGNITIVE_JOB}}</p>
-    <p><b>Inputs:</b> {{INPUTS}} &nbsp;→&nbsp; <b>Outputs:</b> {{OUTPUTS}}</p>
-    <p><b>Autonomy level:</b> {{AUTONOMY}} &nbsp;|&nbsp; <b>Human-in-the-loop points:</b> {{HITL}}</p>
-    <p><b>Failure tolerance:</b> {{FAILURE_TOLERANCE}} &nbsp;|&nbsp; <b>Trust boundary:</b> {{TRUST_BOUNDARY}}</p>
-    <p class="note">Filled during Genesis step G0 (Cognitive Design) via <code>agentic-swe-master</code>.</p>
+    <p><b>Cognitive job:</b> Perform the reasoning a careful senior engineer performs on a pull
+       request — and prove its work. Fan a diff out to <b>four specialist reasoners</b>
+       (security, quality, tests, docs) running in parallel, each returning structured
+       <code>Finding</code> objects carrying <code>confidence</code> and <code>rationale</code>.
+       An <b>aggregator</b> merges the four lanes, deduplicates by file+line, computes an
+       <code>overall_confidence</code>, and produces a <b>draft</b> review that a human approves
+       before anything is posted. Every action is appended to a time-ordered events spine.</p>
+    <p><b>Inputs:</b> a unified diff, the contents of the files it touches, and repo conventions
+       &nbsp;→&nbsp; <b>Outputs:</b> a deduplicated, severity-ranked <code>Finding[]</code> plus a
+       draft review in markdown, and one event row per action</p>
+    <p><b>Autonomy level:</b> Level 2 — <i>“Human reviews output”</i> (study §0.3). Chosen because
+       consequence-of-error is high (a missed vulnerability), the system is brand-new and has
+       earned no trust yet, and it is far easier to remove a checkpoint later than to recover from
+       removing it too early. &nbsp;|&nbsp; <b>Human-in-the-loop points:</b> exactly one, and it is
+       the publish gate — the agent drafts, a human approves, only then does anything reach the PR.
+       Enforced twice: in code (INV-4) and at the credential layer (read-only token).</p>
+    <p><b>Failure tolerance:</b> degrade to <b>slower-but-correct, never fast-but-wrong</b>. A
+       specialist that errors or times out produces a <i>partial</i> review explicitly flagged
+       incomplete; the aggregator never silently drops a lane and never reports a crashed
+       specialist as a clean result. The named primary risk is the study’s “almost-right” problem
+       (§0.2): 90%-correct reviews that lull the reader into rubber-stamping — which is why
+       <code>confidence</code> and <code>rationale</code> are required fields, not optional ones.
+       &nbsp;|&nbsp; <b>Trust boundary:</b> internal/private repo, so diff authors are trusted
+       teammates — but the diff is still <b>untrusted input to an LLM</b>, and dependency updates
+       or generated code can carry injected instructions. Diff content is never allowed to
+       escalate the agent’s privileges, and the agent holds no write scope to escalate to.</p>
+    <p class="note">Filled during Genesis step G0 (Cognitive Design), 2026-08-02. Diagnostic:
+       scope=<b>new</b> · AI components=<b>yes</b> · distributed=<b>no</b> (GitHub Action, ephemeral)
+       · trust boundary=<b>internal, diff untrusted</b> · phase=<b>0→1</b>.
+       Full interview record: <code>.genesis/decisions/decisions-manifest.md</code>.</p>
   </div>
 
   <!-- ───────────── DEFINITION OF DONE ───────────── -->
@@ -54,11 +79,27 @@
     <div class="gate"><span class="box"></span><span class="label">Every outbound call has a timeout / circuit-breaker <span class="note">(production-readiness gate)</span></span></div>
     <div class="gate"><span class="box"></span><span class="label">All LLM/structured outputs validated against a schema <span class="note">(llmops gate)</span></span></div>
     <div class="gate"><span class="box"></span><span class="label">Threat model written; prompt-injection / untrusted-input considered <span class="note">(security gate)</span></span></div>
-    <div class="gate"><span class="box"></span><span class="label"><code>{{TYPECHECK_CMD}}</code> clean AND <code>{{TEST_CMD}}</code> green in CI</span></div>
+    <div class="gate"><span class="box"></span><span class="label"><code>mypy src/</code> clean AND <code>pytest -q</code> green in CI</span></div>
     <div class="gate"><span class="box"></span><span class="label">One <code>verify</code> pass by a <b>separate</b> agent/model (L4)</span></div>
     <div class="gate"><span class="box"></span><span class="label">No <code>context-graph.json</code> invariant violated by the change</span></div>
     <p class="note">A milestone is DONE only when every box above is checked by the verifier. Pull each
        gate from the relevant <code>agentic-swe-master</code> phase gate.</p>
+  </div>
+
+  <div class="card">
+    <p><b>Project-specific gates</b> — lifted from the study’s own phase gates (§4.1) for the
+       phases this scope actually passes through, plus the invariants written at G2.</p>
+    <div class="gate"><span class="box"></span><span class="label"><b>Phase 8 · Multi-Agent</b> — 4 specialists + contracts + aggregator produce <b>one</b> review</span></div>
+    <div class="gate"><span class="box"></span><span class="label"><b>Phase 5 · LLM &amp; Reasoning</b> — every specialist returns schema-valid structured output; prompts are versioned, not inline</span></div>
+    <div class="gate"><span class="box"></span><span class="label"><b>Phase 19 · HITL</b> — the approval gate is wired and a CRITICAL finding forces <code>HOLD</code> regardless of confidence</span></div>
+    <div class="gate"><span class="box"></span><span class="label"><b>Phase 10 · Observability</b> — every action lands on the events spine with tokens + duration</span></div>
+    <div class="gate"><span class="box"></span><span class="label"><b>Phase 12 · Reliability</b> — a forced specialist failure yields a flagged partial review, never a crash and never a false clean</span></div>
+    <div class="gate"><span class="box"></span><span class="label"><b>INV-3 grounding</b> — zero findings cite a file/line absent from the parsed diff</span></div>
+    <div class="gate"><span class="box"></span><span class="label"><b>INV-4 no unattended write</b> — no code path posts to GitHub without human approval</span></div>
+    <p class="note">Deliberately <b>excluded</b> from this scope's definition of done (study phases
+       2, 3, 6, 13, 14, 16, 17, 20): webhook + HMAC idempotency, Redis/ARQ queue, pgvectorscale RAG,
+       Tiger Cloud provisioning, continuous aggregates, Next.js dashboard. Excluded ≠ rejected —
+       these are the documented graduation path if the prototype earns it.</p>
   </div>
 
   <!-- ───────────── IMPLEMENTATION PLAN ───────────── -->
@@ -67,13 +108,14 @@
     <table>
       <thead><tr><th>#</th><th>Milestone</th><th>Phase</th><th>Demo command (proves it works)</th><th>Loops</th><th>Status</th></tr></thead>
       <tbody>
-        <tr><td>M1</td><td>{{M1_NAME}}</td><td>{{M1_PHASE}}</td><td><code>{{M1_DEMO}}</code></td><td>L1, L4</td><td><span class="pill">todo</span></td></tr>
-        <tr><td>M2</td><td>{{M2_NAME}}</td><td>{{M2_PHASE}}</td><td><code>{{M2_DEMO}}</code></td><td>L1, L3, L4</td><td><span class="pill">todo</span></td></tr>
-        <tr><td>M3</td><td>{{M3_NAME}}</td><td>{{M3_PHASE}}</td><td><code>{{M3_DEMO}}</code></td><td>L1, L2, L4</td><td><span class="pill">todo</span></td></tr>
-        <tr><td>…</td><td>add rows as the plan is sliced</td><td></td><td></td><td></td><td></td></tr>
+        <tr><td>M1</td><td>Finding contract + one specialist, fully offline</td><td>1 Architecture → 5 LLM</td><td><code>pr-review run --diff fixtures/sample.diff --agent security --offline</code></td><td>L1, L4</td><td><span class="pill">todo</span></td></tr>
+        <tr><td>M2</td><td>Four specialists in parallel + aggregator</td><td>4 Orchestration + 8 Multi-Agent</td><td><code>pr-review run --diff fixtures/sample.diff --offline --json | jq '.findings | length, (.agents_run | length)'</code></td><td>L1, L3, L4</td><td><span class="pill">todo</span></td></tr>
+        <tr><td>M3</td><td>overall_confidence + the HITL gate</td><td>19 Human-in-the-Loop</td><td><code>pr-review run --diff fixtures/critical.diff --offline --json | jq '.hitl_verdict, .overall_confidence'</code></td><td>L1, L4</td><td><span class="pill">todo</span></td></tr>
+        <tr><td>M4</td><td>The events spine</td><td>10 Observability &amp; Tracing</td><td><code>pr-review run --diff fixtures/sample.diff --offline &amp;&amp; pr-review trace --last</code></td><td>L1, L4</td><td><span class="pill">todo</span></td></tr>
+        <tr><td>M5</td><td>Package as a GitHub Action</td><td>18 CI/CD for AI</td><td><code>act pull_request -W .github/workflows/review.yml</code></td><td>L1, L4</td><td><span class="pill">todo</span></td></tr>
       </tbody>
     </table>
-    <p class="note">Total token budget = (n milestones × 50000). Update <span class="pill wip">wip</span> /
+    <p class="note">Total token budget = 5 milestones × 50000 = <b>250000</b>. Update <span class="pill wip">wip</span> /
        <span class="pill ok">done</span> as loops complete. This table is mirrored in <code>PLAN.md</code> for the agent to parse.</p>
   </div>
 
@@ -83,10 +125,12 @@
     <table>
       <thead><tr><th>Milestone</th><th>Always-on canon</th><th>Milestone-specific skills</th></tr></thead>
       <tbody>
-        <tr><td>M1</td><td>agentic-swe-master, coding-orchestrator, modular-architecture</td><td>tdd, data-systems-engineering</td></tr>
-        <tr><td>M2</td><td>(canon)</td><td>tdd, production-readiness, llmops-ai-agents</td></tr>
-        <tr><td>M3</td><td>(canon)</td><td>tdd, security-engineering, distributed-systems</td></tr>
-        <tr><td>frontend M*</td><td>(canon)</td><td><b>design-system skill (MANDATORY)</b>, tdd, qa</td></tr>
+        <tr><td>M1</td><td>agentic-swe-master, coding-orchestrator, modular-architecture</td><td>tdd</td></tr>
+        <tr><td>M2</td><td>(canon)</td><td>tdd, llmops-ai-agents</td></tr>
+        <tr><td>M3</td><td>(canon)</td><td>tdd, security-engineering</td></tr>
+        <tr><td>M4</td><td>(canon)</td><td>tdd, production-readiness</td></tr>
+        <tr><td>M5</td><td>(canon)</td><td>tdd, production-readiness</td></tr>
+        <tr><td>frontend M*</td><td colspan="2"><i>none in this scope — the Next.js dashboard is deferred (study phase 2)</i></td></tr>
       </tbody>
     </table>
     <p class="note">If a milestone needs a skill not listed, G1 logs "skill X needed but not on the menu — loaded ad hoc" so the choice is visible.</p>

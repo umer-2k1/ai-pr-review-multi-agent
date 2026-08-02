@@ -1,13 +1,69 @@
 {
-  "$comment": "nodes=modules, edges=[cause,effect] where cause is imported-by effect. ADD invariants by hand.",
+  "$comment": "nodes=modules, edges=[cause,effect] where cause is imported-by effect. Invariants added by hand at G2.",
   "project": ".",
   "generated": "2026-08-02T10:49:21.077Z",
-  "nodes": [],
-  "edges": [],
+  "graphized": "empty — repo has no source yet; nodes below are SEEDED from the G0.5 chosen architecture (genesis.md G2: 'Empty repo? Seed nodes from the architecture you chose in G0'). Re-run graphizer.mjs after M1 to replace seeds with real import edges.",
+  "nodes": [
+    { "id": "contracts",   "path": "src/prreview/contracts.py",        "layer": "core",  "purpose": "Finding + Review pydantic models. Depends on nothing." },
+    { "id": "diff",        "path": "src/prreview/diff.py",             "layer": "core",  "purpose": "Parse unified diff into changed files/hunks/line ranges." },
+    { "id": "agents_base", "path": "src/prreview/agents/base.py",      "layer": "domain", "purpose": "Shared specialist shape: prompt, LLM call, parse, error handling." },
+    { "id": "agent_security", "path": "src/prreview/agents/security.py", "layer": "domain", "purpose": "Security specialist." },
+    { "id": "agent_quality",  "path": "src/prreview/agents/quality.py",  "layer": "domain", "purpose": "Quality specialist." },
+    { "id": "agent_tests",    "path": "src/prreview/agents/tests.py",    "layer": "domain", "purpose": "Test-coverage specialist." },
+    { "id": "agent_docs",     "path": "src/prreview/agents/docs.py",     "layer": "domain", "purpose": "Docs specialist." },
+    { "id": "aggregator",  "path": "src/prreview/aggregator.py",      "layer": "domain", "purpose": "Merge 4 Finding lists, dedupe by file+line, compute overall_confidence, apply HITL gate." },
+    { "id": "orchestrator","path": "src/prreview/orchestrator.py",    "layer": "app",   "purpose": "Fan out to specialists in parallel, collect partials, hand to aggregator." },
+    { "id": "events",      "path": "src/prreview/events.py",          "layer": "app",   "purpose": "Append-only events spine: one time-ordered row per action." },
+    { "id": "llm",         "path": "src/prreview/llm.py",             "layer": "adapter", "purpose": "LLM client wrapper: timeout, retry, structured output." },
+    { "id": "github",      "path": "src/prreview/github.py",          "layer": "adapter", "purpose": "Read PR diff. Read-only scope in this milestone set." },
+    { "id": "cli",         "path": "src/prreview/cli.py",             "layer": "entry", "purpose": "pr-review run --diff <path> | --pr <n>" }
+  ],
+  "edges": [
+    ["contracts", "agents_base"],
+    ["contracts", "aggregator"],
+    ["diff", "agents_base"],
+    ["agents_base", "agent_security"],
+    ["agents_base", "agent_quality"],
+    ["agents_base", "agent_tests"],
+    ["agents_base", "agent_docs"],
+    ["llm", "agents_base"],
+    ["agent_security", "orchestrator"],
+    ["agent_quality", "orchestrator"],
+    ["agent_tests", "orchestrator"],
+    ["agent_docs", "orchestrator"],
+    ["aggregator", "orchestrator"],
+    ["events", "orchestrator"],
+    ["github", "cli"],
+    ["orchestrator", "cli"]
+  ],
   "invariants": {
-    "$TODO": "Add 2-3 health rules, e.g. \"API latency < 200ms\", \"domain imports no framework\"."
+    "INV-1-dependency-direction": {
+      "rule": "Dependencies point inward only: entry -> app -> domain -> core. core/ (contracts.py, diff.py) imports nothing from this package; agents/ never import orchestrator, cli, github, or events.",
+      "why": "Study ADR-002 dependency rule. Keeps the specialists testable offline with zero network and zero I/O, which is what makes M1's demo command runnable in CI.",
+      "check": "python -c \"import ast,pathlib,sys; bad=[(p,n.module) for p in pathlib.Path('src/prreview').rglob('*.py') for n in ast.walk(ast.parse(p.read_text())) if isinstance(n,ast.ImportFrom) and n.module and ((p.name in ('contracts.py','diff.py') and 'prreview' in n.module) or ('agents/' in str(p) and any(m in n.module for m in ('orchestrator','cli','github','events'))))]; print(bad); sys.exit(1 if bad else 0)\"",
+      "violation_means": "A specialist has grown a hidden dependency on the outside world. Tests will start needing network."
+    },
+    "INV-2-every-outbound-call-has-a-timeout": {
+      "rule": "Every network call (LLM, GitHub API) is made through llm.py or github.py and passes an explicit timeout. No bare requests/httpx/anthropic call anywhere else in the tree.",
+      "why": "Study §0.2 'Tool / API timeout' failure mode + §4.1 Phase 12. A CI job that hangs forever is the prototype's most likely real-world failure, and it is invisible until it happens.",
+      "check": "! grep -rnE '(httpx|requests)\\.(get|post)\\(|anthropic\\.|Anthropic\\(' src/prreview --include='*.py' | grep -vE 'src/prreview/(llm|github)\\.py' ; grep -rn 'timeout' src/prreview/llm.py src/prreview/github.py",
+      "violation_means": "An unbounded wait exists. The system can now fail fast-but-hung instead of slower-but-correct."
+    },
+    "INV-3-no-ungrounded-finding": {
+      "rule": "Every Finding's file_path must appear in the parsed diff, and line_start/line_end must fall inside a hunk range of that file. Findings failing this are dropped and counted, never shown.",
+      "why": "Study §0.2 'Hallucination in a critical path' and the stated quality bar. A finding pointing at a nonexistent line is the single most credibility-destroying output this tool can produce.",
+      "check": "pytest -q tests/test_grounding.py",
+      "violation_means": "The reviewer is hallucinating locations. Trust in every other finding drops to zero."
+    },
+    "INV-4-no-unattended-write": {
+      "rule": "No code path posts to GitHub without an explicit human approval step. The GitHub token used in this milestone set is read-only.",
+      "why": "The autonomy level chosen at G0 is 'Human reviews output' (study §0.3 level 2). Enforced at the credential layer as well as in code so a bug cannot escalate autonomy.",
+      "check": "! grep -rnE '\\.(create_review|create_comment|post)\\(' src/prreview --include='*.py'",
+      "violation_means": "The agent can speak in your name. This is the one failure the HITL design exists to prevent."
+    }
   },
   "freeze_boundary": [
-    "src/**"
+    "src/**",
+    "tests/**"
   ]
 }
