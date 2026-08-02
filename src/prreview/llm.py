@@ -96,7 +96,10 @@ class OfflineLLM:
         findings: list[dict[str, object]] = []
         current_file = ""
 
-        for raw in user.splitlines():
+        # split("\n"), not splitlines(): the latter also breaks on \x0c,   and
+        # friends, which the prompt escapes but which could still arrive from a
+        # future renderer. Defence in depth for the same bug class as diff.py.
+        for raw in user.split("\n"):
             if raw.startswith("--- FILE: "):
                 current_file = raw[len("--- FILE: "):].strip()
                 continue

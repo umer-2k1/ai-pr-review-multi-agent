@@ -248,6 +248,30 @@ def parse_diff(text: str) -> Diff:
     return diff
 
 
+# Characters Python treats as line boundaries but a diff treats as content.
+# Anything here must be escaped before it reaches a prompt — see _escape_content.
+_LINE_SEPARATORS = "\x0b\x0c\x1c\x1d\x1e\x85  "
+_ESCAPE_TABLE = {ord(ch): f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}"
+                 for ch in _LINE_SEPARATORS}
+
+
+def _escape_content(content: str) -> str:
+    """Render content so one source line is always one physical prompt line.
+
+    The prompt's whole contract is `<line_no>: <content>`, which only holds if
+    content cannot itself contain a line break. A form feed or U+2028 inside an
+    added line splits the entry in two: the tail becomes an orphan line that any
+    consumer re-reading the prompt will mis-attribute to whatever number the tail
+    happens to start with, and the head loses the rest of its content.
+
+    That produced both halves of a real failure — a CRITICAL finding pinned to an
+    unmodified context line, and a credential on a split line silently missed.
+    Escaping here fixes the live model path too, which was receiving the same
+    mangled prompt.
+    """
+    return content.translate(_ESCAPE_TABLE)
+
+
 def render_for_prompt(diff: Diff, max_chars: int = 12000) -> str:
     """Flatten a parsed diff into the text a specialist actually sees.
 
@@ -256,9 +280,9 @@ def render_for_prompt(diff: Diff, max_chars: int = 12000) -> str:
     """
     out: list[str] = []
     for f in diff.files:
-        out.append(f"--- FILE: {f.path}")
+        out.append(f"--- FILE: {_escape_content(f.path)}")
         for line_no in sorted(f.added_lines):
-            out.append(f"{line_no}: {f.added_lines[line_no]}")
+            out.append(f"{line_no}: {_escape_content(f.added_lines[line_no])}")
     text = "\n".join(out)
     if len(text) > max_chars:
         text = text[:max_chars] + "\n… [truncated]"

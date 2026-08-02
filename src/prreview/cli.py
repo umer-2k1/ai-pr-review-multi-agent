@@ -93,7 +93,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # A delete-only PR is legitimate input; calling it malformed is a lie.
         looks_like_a_diff = any(
             line.startswith(("diff --git", "--- ", "+++ ", "@@"))
-            for line in diff_text.splitlines()
+            for line in diff_text.split("\n")
         )
         if looks_like_a_diff:
             print(f"note: {diff_path} contains no reviewable post-image lines "
