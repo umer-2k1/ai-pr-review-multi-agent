@@ -187,7 +187,13 @@ class AnthropicLLM:
         if not self._api_key:
             raise LLMError("ANTHROPIC_API_KEY is not set; use --offline to run without a key")
 
-        client = anthropic.Anthropic(api_key=self._api_key, timeout=self.timeout_s)
+        # Constructed inside the guard: an SDK version without a `timeout` kwarg,
+        # or a malformed key, raises here. Outside the guard that exception escapes
+        # `complete()` uncaught and crashes the run instead of becoming a failed lane.
+        try:
+            client = anthropic.Anthropic(api_key=self._api_key, timeout=self.timeout_s)
+        except Exception as exc:  # noqa: BLE001
+            raise LLMError(f"could not construct Anthropic client: {exc}") from exc
 
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):

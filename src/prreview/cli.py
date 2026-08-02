@@ -43,6 +43,13 @@ def _render_text(result: AgentResult) -> str:
     status = "ok" if result.ok else f"FAILED ({result.error})"
     lines.append(f"agent: {result.agent_type.value}  [{status}]")
     lines.append(f"findings: {len(result.findings)}   tokens: {result.tokens}   {result.duration_ms}ms")
+    if result.dropped_ungrounded:
+        lines.append(
+            f"dropped: {result.dropped_ungrounded} ungrounded "
+            f"(cited a file/line absent from the diff)"
+        )
+    if result.all_findings_were_hallucinated:
+        lines.append("WARNING: every finding this lane produced was ungrounded — this is NOT a clean review.")
     lines.append("")
     for f in result.findings:
         lines.append(f"  [{f.severity.value.upper():8}] {f.file_path}:{f.line_start}  ({f.category})")
@@ -63,7 +70,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"error: no such diff file: {diff_path}", file=sys.stderr)
         return 2
 
-    diff = parse_diff(diff_path.read_text())
+    try:
+        diff_text = diff_path.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        # Bad input is exit 2, same as every other bad-input branch. Letting this
+        # traceback out would exit 1, which is the "a lane failed" code — two very
+        # different problems must not share an exit status.
+        print(f"error: cannot read {diff_path}: {exc}", file=sys.stderr)
+        return 2
+
+    diff = parse_diff(diff_text)
     if not diff.files:
         print(f"error: no files parsed from {diff_path} — is it a unified diff?", file=sys.stderr)
         return 2
@@ -79,6 +95,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "error": result.error,
             "tokens": result.tokens,
             "duration_ms": result.duration_ms,
+            "dropped_ungrounded": result.dropped_ungrounded,
+            "all_findings_were_hallucinated": result.all_findings_were_hallucinated,
             "findings": [_finding_dict(f) for f in result.findings],
         }, indent=2))
     else:

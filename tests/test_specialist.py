@@ -60,10 +60,10 @@ class PartiallyMalformedLLM:
         return LLMResponse(
             text='{"findings": ['
             '{"severity": "nonsense-level", "category": "c", "summary": "s",'
-            ' "file_path": "app/db.py", "line_start": 15, "line_end": 15,'
+            ' "file_path": "app/db.py", "line_start": 10, "line_end": 10,'
             ' "confidence": 0.5, "rationale": "r"},'
             '{"severity": "major", "category": "good", "summary": "s",'
-            ' "file_path": "app/db.py", "line_start": 15, "line_end": 15,'
+            ' "file_path": "app/db.py", "line_start": 10, "line_end": 10,'
             ' "confidence": 0.5, "rationale": "r"}]}',
             tokens=5,
         )
@@ -74,6 +74,53 @@ def test_one_malformed_finding_does_not_sink_the_lane() -> None:
     assert result.ok is True
     assert len(result.findings) == 1
     assert result.findings[0].category == "good"
+
+
+class _RaisingLLM:
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    def complete(self, system: str, user: str) -> LLMResponse:
+        raise self.exc
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        OSError("disk went away"),
+        TimeoutError("read timed out"),
+        ConnectionError("connection reset"),
+        TypeError("bad kwarg"),
+        AttributeError("no such attribute"),
+        KeyError("missing"),
+        RecursionError("too deep"),
+    ],
+    ids=lambda e: type(e).__name__,
+)
+def test_review_never_raises_whatever_the_client_throws(exc: BaseException) -> None:
+    """B4 regression.
+
+    `review()` promises the orchestrator it never raises. A narrow except tuple
+    let all of these escape and crash the CLI with a traceback — and a lane that
+    crashes the process cannot be reported as a failed lane, which is what M2's
+    partial-review guarantee is built on.
+    """
+    result = SecuritySpecialist(_RaisingLLM(exc)).review(_diff())
+    assert result.ok is False
+    assert result.error is not None
+    assert type(exc).__name__ in result.error
+    assert result.findings == ()
+
+
+def test_deeply_nested_json_does_not_escape() -> None:
+    """RecursionError from json.loads is a lane failure, not a crash."""
+
+    class DeepLLM:
+        def complete(self, system: str, user: str) -> LLMResponse:
+            return LLMResponse(text="{" + '"a":[' * 20000 + "]" * 20000 + "}", tokens=1)
+
+    result = SecuritySpecialist(DeepLLM()).review(_diff())
+    assert result.ok is False
 
 
 def test_findings_are_immutable() -> None:

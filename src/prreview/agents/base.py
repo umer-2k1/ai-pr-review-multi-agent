@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from prreview.contracts import AgentResult, AgentType, Finding, Severity
 from prreview.diff import Diff, render_for_prompt
-from prreview.llm import LLMClient, LLMError
+from prreview.llm import LLMClient
 
 _SYSTEM_PREAMBLE = """You are one specialist in a multi-agent pull-request review.
 You review ONLY your own concern. Another agent covers the others; do not duplicate their work.
@@ -78,8 +78,15 @@ class Specialist(ABC):
                 ok=True,
                 tokens=response.tokens,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                dropped_ungrounded=len(raw) - len(grounded),
             )
-        except (LLMError, ValueError, ValidationError, json.JSONDecodeError) as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Deliberately broad. The promise this method makes to the
+            # orchestrator is "I never raise", and that promise is load-bearing:
+            # a lane that crashes the process cannot be reported as a failed lane,
+            # and the partial-review guarantee collapses. A narrow tuple let
+            # OSError, TimeoutError, TypeError and RecursionError (deeply nested
+            # JSON) escape and take the CLI down with a traceback.
             return AgentResult(
                 agent_type=self.agent_type,
                 findings=(),

@@ -50,17 +50,26 @@ class Diff:
         return None
 
     def is_grounded(self, path: str, line_start: int, line_end: int) -> bool:
-        """True only if the path is in the diff AND the range touches a real hunk.
+        """True only if the whole range lies inside a single hunk of that file.
 
-        This is the INV-3 predicate. Deliberately strict: an unknown path is not
-        grounded, and a range that misses every hunk is not grounded either.
+        This is the INV-3 predicate, and it is deliberately **containment, not
+        overlap**. An earlier version asked whether the range touched any hunk
+        line, which let a finding claiming lines 1..100000 pass on a diff whose
+        only hunk was 10..23 — neither endpoint real, accepted purely because the
+        span straddled the hunk. The CLI then printed a location that does not
+        exist, which is precisely the failure INV-3 exists to prevent.
+
+        Containment is also O(number of hunks) instead of O(range size). The old
+        form enumerated every line, so a model emitting `line_end: 1000000000`
+        bought minutes of dead spin per finding — an unbounded wait driven by
+        untrusted model output.
         """
         fd = self.by_path(path)
         if fd is None:
             return False
         if line_end < line_start:
             return False
-        return any(fd.contains_line(ln) for ln in range(line_start, line_end + 1))
+        return any(h.start <= line_start and line_end <= h.end for h in fd.hunks)
 
     @property
     def paths(self) -> list[str]:
@@ -77,9 +86,14 @@ def parse_diff(text: str) -> Diff:
     current: FileDiff | None = None
     new_line = 0
 
+    in_hunk = False
+
     for raw in text.splitlines():
+        # The header check must not run inside a hunk body: an *added* line whose
+        # content happens to start with "++ " would otherwise be misread as a file
+        # header, inventing a phantom file and silently losing the real one's line.
         m_file = _NEW_FILE_RE.match(raw)
-        if raw.startswith("+++ ") and m_file:
+        if not in_hunk and raw.startswith("+++ ") and m_file:
             path = m_file.group(1)
             if path == "/dev/null":  # deleted file — nothing to review
                 current = None
@@ -87,6 +101,9 @@ def parse_diff(text: str) -> Diff:
             current = FileDiff(path=path)
             diff.files.append(current)
             continue
+
+        if raw.startswith("diff --git") or raw.startswith("--- "):
+            in_hunk = False
 
         if raw.startswith("@@"):
             m_hunk = _HUNK_RE.match(raw)
@@ -97,6 +114,7 @@ def parse_diff(text: str) -> Diff:
                 end = start + max(count, 1) - 1
                 current.hunks.append(Hunk(start=start, end=end))
                 new_line = start
+                in_hunk = True
             continue
 
         if current is None:
@@ -107,9 +125,16 @@ def parse_diff(text: str) -> Diff:
             new_line += 1
         elif raw.startswith("-"):
             pass  # old side only; does not advance new-side numbering
-        elif raw.startswith(" "):
+        elif raw.startswith("\\"):
+            pass  # "\ No newline at end of file" — a note, not a line
+        elif raw.startswith(" ") or raw == "":
+            # An unmodified context line advances the new-side counter. `git diff`
+            # writes a blank context line as a single space, but editors, mail
+            # clients and copy-paste routinely strip trailing whitespace, leaving
+            # "". Treating that as "not a line" silently shifts every subsequent
+            # line number by one — findings then cite locations that are off by
+            # the number of blank context lines above them.
             new_line += 1
-
 
     return diff
 

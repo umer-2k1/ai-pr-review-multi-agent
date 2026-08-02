@@ -84,6 +84,18 @@ class AgentResult(BaseModel):
     tokens: int = 0
     duration_ms: int = 0
 
+    # How many findings this lane produced that cited a location absent from the
+    # diff, and were therefore dropped (INV-3). Counted, not just discarded: a
+    # lane whose every output was hallucinated would otherwise be indistinguishable
+    # from a genuinely clean lane, and a rising count is the earliest warning that
+    # the model is drifting.
+    dropped_ungrounded: int = Field(default=0, ge=0)
+
+    @property
+    def all_findings_were_hallucinated(self) -> bool:
+        """True when the lane produced output, and none of it survived grounding."""
+        return self.ok and not self.findings and self.dropped_ungrounded > 0
+
 
 class HitlVerdict(str, Enum):
     """The publish gate. Level 2 autonomy: the agent drafts, a human approves."""
