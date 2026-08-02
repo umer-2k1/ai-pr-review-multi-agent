@@ -117,7 +117,7 @@ class EventLog:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self.write_error = f"{type(exc).__name__}: {exc}"
             if not self._warned:
                 self._warned = True
@@ -176,7 +176,8 @@ def format_trace(events: list[Event]) -> str:
     if not events:
         return "no events recorded."
     lines: list[str] = []
-    # Never negative, even if rows arrive out of order or the clock stepped back.
+    # Elapsed times are measured from min(ts), not from the first row, so a row
+    # arriving out of order cannot produce a negative offset.
     stamps = [e.ts for e in events]
     first = events[0]
     wall_ms = max(0, int((max(stamps) - min(stamps)) * 1000))

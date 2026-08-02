@@ -183,6 +183,78 @@ class TestEventsSpineCLI:
         assert any(e.event_type == "gate_decided" for e in rows)
         assert [e.seq for e in rows] == sorted(e.seq for e in rows)
 
+    def test_the_gate_row_carries_the_actual_verdict_and_confidence(self, tmp_path: Path) -> None:
+        """Only the row's existence was asserted, never its payload — so a
+        `gate_decided` row claiming the wrong verdict passed the suite. The spine's
+        audit claim rests on this row being true, not merely present."""
+        from prreview.events import read_log
+
+        events = tmp_path / "events.jsonl"
+        main(["run", "--diff", "fixtures/critical.diff", "--offline", "--events", str(events)])
+
+        gate = [e for e in read_log(events) if e.event_type == "gate_decided"]
+        assert len(gate) == 1
+        assert gate[0].detail["verdict"] == "HOLD", "the spine recorded a verdict the review did not reach"
+        assert isinstance(gate[0].detail["confidence"], float)
+        assert gate[0].detail["findings"] == 2
+
+    def test_a_failed_lane_is_visible_in_the_rendered_trace(self, tmp_path: Path,
+                                                            capsys: pytest.CaptureFixture[str]) -> None:
+        """Asserted on the rendered output, not just the in-memory rows.
+
+        Hiding the FAILED line in format_trace passed the suite — and a trace that
+        does not show a dead lane is exactly the false-clean the spine exists to
+        prevent.
+        """
+        from prreview.events import EventLog, format_trace, read_log
+        from prreview.contracts import AgentResult, AgentType
+
+        events = tmp_path / "events.jsonl"
+        log = EventLog(path=events)
+        log.emit("r", "review_started")
+        log.emit("r", "agent_completed", AgentType.QUALITY,
+                 AgentResult(agent_type=AgentType.QUALITY, ok=False, error="LLMError: boom"))
+
+        rendered = format_trace(read_log(events))
+        assert "FAILED" in rendered, "a dead lane is invisible in the trace"
+        assert "boom" in rendered, "the reason the lane died is not shown"
+
+    def test_last_selects_the_most_recent_review(self, tmp_path: Path,
+                                                 capsys: pytest.CaptureFixture[str]) -> None:
+        from prreview.events import read_log
+
+        events = tmp_path / "events.jsonl"
+        main(["run", "--diff", "fixtures/sample.diff", "--offline", "--events", str(events)])
+        main(["run", "--diff", "fixtures/critical.diff", "--offline", "--events", str(events)])
+        capsys.readouterr()
+
+        rows = read_log(events)
+        first_id, last_id = rows[0].review_id, rows[-1].review_id
+        assert first_id != last_id
+
+        code, out = _run(["trace", "--last", "--events", str(events)], capsys)
+        assert code == 0
+        assert last_id in out
+        assert first_id not in out, "--last rendered the wrong review"
+
+    def test_trace_renders_only_the_selected_review(self, tmp_path: Path,
+                                                    capsys: pytest.CaptureFixture[str]) -> None:
+        from prreview.events import read_log
+
+        events = tmp_path / "events.jsonl"
+        main(["run", "--diff", "fixtures/sample.diff", "--offline", "--events", str(events)])
+        main(["run", "--diff", "fixtures/critical.diff", "--offline", "--events", str(events)])
+        capsys.readouterr()
+
+        all_rows = read_log(events)
+        target = all_rows[0].review_id
+        code, out = _run(["trace", "--review-id", target, "--events", str(events)], capsys)
+        assert code == 0
+        # the header states the row count for that review only
+        rendered_count = len([e for e in all_rows if e.review_id == target])
+        assert f"{rendered_count} events" in out
+        assert rendered_count < len(all_rows), "the filter did not narrow anything"
+
     def test_every_row_carries_the_required_fields(self, tmp_path: Path) -> None:
         from prreview.events import read_log
 
