@@ -217,14 +217,24 @@ def test_line_separator_does_not_hide_a_real_finding(sep: str) -> None:
 
 
 def test_rendered_prompt_is_one_physical_line_per_source_line() -> None:
-    """The structural guarantee the fix rests on."""
-    from prreview.diff import render_for_prompt
+    """The structural guarantee the whole escape fix rests on.
 
-    text = "--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,3 @@\n ctx\n+x = 'a\x0cb'\n+y = 'c d'\n"
+    Asserted over the full separator set at once, including \\r. This is the test
+    that actually pins the escaping: the parametrized separator tests above are
+    also satisfied by llm.py's split("\\n"), so on their own they would stay green
+    if the escape were removed - they pin the defence-in-depth, not the fix.
+    """
+    from prreview.diff import _LINE_SEPARATORS, render_for_prompt
+
+    body = "".join(f"+x{i} = 'a{sep}b'\n" for i, sep in enumerate(_LINE_SEPARATORS))
+    text = f"--- a/a.py\n+++ b/a.py\n@@ -1,1 +1,{len(_LINE_SEPARATORS) + 1} @@\n ctx\n{body}"
     rendered = render_for_prompt(parse_diff(text))
+
     assert len(rendered.split("\n")) == len(rendered.splitlines()), (
         "renderer emitted a character Python treats as a line break"
     )
+    for sep in _LINE_SEPARATORS:
+        assert sep not in rendered, f"U+{ord(sep):04X} reached the prompt unescaped"
 
 
 def test_malformed_and_ungrounded_are_counted_separately() -> None:

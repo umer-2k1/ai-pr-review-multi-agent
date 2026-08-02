@@ -250,7 +250,9 @@ def parse_diff(text: str) -> Diff:
 
 # Characters Python treats as line boundaries but a diff treats as content.
 # Anything here must be escaped before it reaches a prompt — see _escape_content.
-_LINE_SEPARATORS = "\x0b\x0c\x1c\x1d\x1e\x85  "
+# \r is included: once the reader stops translating newlines a mid-line CR
+# survives into the content, and splitlines() breaks on it like the rest.
+_LINE_SEPARATORS = "\r\x0b\x0c\x1c\x1d\x1e\x85  "
 _ESCAPE_TABLE = {ord(ch): f"\\x{ord(ch):02x}" if ord(ch) < 0x100 else f"\\u{ord(ch):04x}"
                  for ch in _LINE_SEPARATORS}
 

@@ -79,7 +79,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        diff_text = diff_path.read_text()
+        # newline="" disables universal-newline translation. Without it Python
+        # rewrites a lone \r anywhere in the file to \n *before* the parser runs,
+        # inserting a phantom line break mid-content: every later line number in
+        # that hunk shifts, and the shifted line still sits inside the hunk, so
+        # is_grounded() accepts a finding pointed at the wrong line. A lone \r
+        # reaches a diff via committed terminal/CI transcripts with progress
+        # redraws, classic-Mac line endings, and CRs inside string literals.
+        # CRLF is unaffected: the trailing \r is stripped per-line in parse_diff.
+        # Path.read_text() only accepts `newline` from 3.13; this package targets
+        # >=3.11, so go through open() to stay portable.
+        with diff_path.open("r", newline="") as handle:
+            diff_text = handle.read()
     except (OSError, UnicodeDecodeError) as exc:
         # Bad input is exit 2, same as every other bad-input branch. Letting this
         # traceback out would exit 1, which is the "a lane failed" code — two very
