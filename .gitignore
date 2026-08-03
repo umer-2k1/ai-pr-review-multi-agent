@@ -7,3 +7,7 @@ __pycache__/
 build/
 dist/
 .events/
+
+# Run artifacts the action writes into the working directory.
+review.json
+trace.txt

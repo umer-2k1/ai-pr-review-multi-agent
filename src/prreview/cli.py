@@ -214,6 +214,13 @@ def _load_diff_text(args: argparse.Namespace) -> tuple[str | None, int]:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    if args.json_out and args.agent:
+        # --json-out writes the merged Review; a single lane never produces one.
+        # Silently writing an AgentResult under the same flag would hand CI a
+        # document with no hitl_verdict, which is the field the gate reads.
+        print("error: --json-out applies to the full fan-out, not --agent", file=sys.stderr)
+        return 2
+
     diff_text, code = _load_diff_text(args)
     if diff_text is None:
         return code
@@ -259,6 +266,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
              verdict=review.hitl_verdict.value,
              confidence=review.overall_confidence,
              findings=len(review.findings))
+
+    if args.json_out:
+        # Written from the SAME review object that stdout renders, so the draft a
+        # human approves, the JSON a CI job thresholds on, and the events trace
+        # all describe one review. Producing them from two invocations would let
+        # a human approve a draft that is not the artifact that was gated.
+        try:
+            Path(args.json_out).write_text(
+                json.dumps(_review_dict(review), indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            print(f"error: cannot write {args.json_out}: {exc}", file=sys.stderr)
+            return 2
 
     if args.draft:
         # The markdown a human reads before deciding to post it. Produced for
@@ -323,6 +343,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     run.add_argument("--draft", action="store_true",
                      help="Emit the markdown draft review for a human to approve.")
+    run.add_argument("--json-out", default=None, metavar="PATH",
+                     help="Also write the review as JSON to PATH. Combine with --draft to "
+                          "get both artifacts from ONE fan-out.")
     run.add_argument("--events", default=str(DEFAULT_EVENTS_PATH),
                      help=f"Events spine file (default: {DEFAULT_EVENTS_PATH}).")
     run.add_argument("--no-events", action="store_true",

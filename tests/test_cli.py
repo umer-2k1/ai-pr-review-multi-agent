@@ -344,3 +344,46 @@ def test_delete_only_diff_exits_0_with_a_note(tmp_path: Path) -> None:
     path = tmp_path / "del.diff"
     path.write_text("--- a/gone.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-x = 1\n-y = 2\n")
     assert main(["run", "--diff", str(path), "--offline"]) == 0
+
+
+class TestJsonOutSharesOneReview:
+    """`--json-out` exists so the Action can emit every artifact from ONE
+    fan-out. If the draft, the JSON and the events trace can disagree, the
+    human-approval gate is approving a document nobody gated."""
+
+    def test_draft_and_json_come_from_the_same_review(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "review.json"
+        events = tmp_path / "events.jsonl"
+        code = main(["run", "--diff", "fixtures/critical.diff", "--offline",
+                     "--draft", "--json-out", str(out), "--events", str(events)])
+        assert code == 0
+        draft = capsys.readouterr().out
+        payload = json.loads(out.read_text())
+
+        # The draft names the review it describes; it must be the JSON's review.
+        assert payload["review_id"] in draft
+        # ...and the trace must reconstruct that same review, not another one.
+        ids = {json.loads(line)["review_id"] for line in events.read_text().splitlines() if line}
+        assert ids == {payload["review_id"]}
+
+    def test_one_invocation_runs_each_specialist_once(self, tmp_path: Path) -> None:
+        """Regression for the doubled LLM bill: four lanes, not eight."""
+        events = tmp_path / "events.jsonl"
+        main(["run", "--diff", "fixtures/critical.diff", "--offline",
+              "--draft", "--json-out", str(tmp_path / "r.json"), "--events", str(events)])
+        rows = [json.loads(line) for line in events.read_text().splitlines() if line]
+        assert sum(r["event_type"] == "agent_completed" for r in rows) == 4
+
+    def test_json_out_is_rejected_for_a_single_lane(self, tmp_path: Path) -> None:
+        """A lane produces an AgentResult, which has no hitl_verdict — the field
+        CI reads. Writing one under this flag would hand CI a silent hole."""
+        assert main(["run", "--diff", "fixtures/sample.diff", "--offline",
+                     "--agent", "security", "--json-out", str(tmp_path / "r.json")]) == 2
+
+    def test_unwritable_json_out_exits_2(self, tmp_path: Path) -> None:
+        """The gate reads this file. Failing to write it must not look like success."""
+        target = tmp_path / "missing-dir" / "review.json"
+        assert main(["run", "--diff", "fixtures/sample.diff", "--offline",
+                     "--json-out", str(target)]) == 2

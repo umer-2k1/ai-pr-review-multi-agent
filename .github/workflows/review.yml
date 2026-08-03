@@ -50,10 +50,20 @@ jobs:
 
       - name: Report
         if: always()
+        # Through env:, not ${{ }} inside run:. These three values are derived
+        # from the PR diff, which a fork author controls, and an expression is
+        # substituted as raw text before bash parses the script. Today's values
+        # are an enum, a float and an int and could not inject anything — but the
+        # rule that holds is structural, not one that depends on re-deriving that
+        # argument every time the renderer changes.
+        env:
+          VERDICT: ${{ steps.review.outputs.verdict }}
+          CONFIDENCE: ${{ steps.review.outputs.confidence }}
+          FINDINGS: ${{ steps.review.outputs.findings }}
         run: |
-          echo "verdict:    ${{ steps.review.outputs.verdict }}"
-          echo "confidence: ${{ steps.review.outputs.confidence }}"
-          echo "findings:   ${{ steps.review.outputs.findings }}"
+          echo "verdict:    ${VERDICT:-}"
+          echo "confidence: ${CONFIDENCE:-}"
+          echo "findings:   ${FINDINGS:-}"
           echo ""
           echo "The draft review is in the job summary above."
           echo "Nothing has been posted to the pull request — a human posts it."
