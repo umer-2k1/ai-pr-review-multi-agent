@@ -76,7 +76,8 @@ def dedupe(findings: list[Finding]) -> list[Finding]:
 
 
 def sort_findings(findings: list[Finding]) -> list[Finding]:
-    """Worst first, then most confident. Reviewer attention is the scarce resource."""
+    """Worst first, then most confident. Reviewer a
+    ttention is the scarce resource."""
     return sorted(
         findings,
         key=lambda f: (-SEVERITY_RANK[f.severity], -f.confidence, f.file_path, f.line_start),
